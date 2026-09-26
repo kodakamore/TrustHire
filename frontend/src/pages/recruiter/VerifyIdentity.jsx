@@ -1,9 +1,18 @@
-import React, { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
-import VerificationProgress from '../../components/VerificationProgress';
-import FaceLivenessCapture from '../../components/FaceLivenessCapture';
-import { auth, verify as verifyApi } from '../../services/api';
-import { AlertCircle, CheckCircle2, Phone, ShieldCheck, Mail, KeyRound, RefreshCw, ArrowRight } from 'lucide-react';
+import React, { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
+import VerificationProgress from "../../components/VerificationProgress";
+import FaceLivenessCapture from "../../components/FaceLivenessCapture";
+import { auth, verify as verifyApi } from "../../services/api";
+import {
+  AlertCircle,
+  CheckCircle2,
+  Phone,
+  ShieldCheck,
+  Mail,
+  KeyRound,
+  RefreshCw,
+  ArrowRight,
+} from "lucide-react";
 
 const VerifyIdentity = () => {
   const [currentStep, setCurrentStep] = useState(1);
@@ -17,18 +26,18 @@ const VerifyIdentity = () => {
   const [recruiter, setRecruiter] = useState(null);
 
   // Step 1: Email OTP
-  const [emailOtp, setEmailOtp] = useState('');
+  const [emailOtp, setEmailOtp] = useState("");
 
   // Step 2: Phone OTP & Carrier Screening via Dojah
-  const [phoneNumber, setPhoneNumber] = useState('');
-  const [phoneOtp, setPhoneOtp] = useState('');
+  const [phoneNumber, setPhoneNumber] = useState("");
+  const [phoneOtp, setPhoneOtp] = useState("");
   const [phoneOtpSent, setPhoneOtpSent] = useState(false);
-  const [phoneDebugOtp, setPhoneDebugOtp] = useState('');
+  const [phoneDebugOtp, setPhoneDebugOtp] = useState("");
   const [dojahCarrierData, setDojahCarrierData] = useState(null);
 
   // Step 3: Government ID
-  const [idType, setIdType] = useState('NIN');
-  const [idNumber, setIdNumber] = useState('');
+  const [idType, setIdType] = useState("NIN");
+  const [idNumber, setIdNumber] = useState("");
 
   // Step 4: Face Biometrics
   const [liveSelfieBase64, setLiveSelfieBase64] = useState(null);
@@ -54,7 +63,7 @@ const VerifyIdentity = () => {
         else setCurrentStep(4);
       }
     } catch (err) {
-      console.warn('Could not load recruiter verification status:', err);
+      console.warn("Could not load recruiter verification status:", err);
     }
   };
 
@@ -66,25 +75,35 @@ const VerifyIdentity = () => {
   const handleVerifyEmailByCode = async (e) => {
     if (e) e.preventDefault();
     if (!emailOtp || emailOtp.length !== 6) {
-      setErrorMsg('Please enter the 6-digit verification code from your email.');
+      setErrorMsg(
+        "Please enter the 6-digit verification code from your email.",
+      );
       return;
     }
     setLoading(true);
     setErrorMsg(null);
     setSuccessMsg(null);
     try {
-      const res = await auth.verifyEmailOtp({ email: recruiter?.email, otp: emailOtp });
+      const res = await auth.verifyEmailOtp({
+        email: recruiter?.email,
+        otp: emailOtp,
+      });
       if (res.data?.data?.token) {
-        localStorage.setItem('token', res.data.data.token);
+        localStorage.setItem("token", res.data.data.token);
       }
-      setStatus(prev => ({ ...prev, emailVerified: true }));
-      setSuccessMsg('Email verified successfully!');
+      if (!res.data?.success) {
+        throw new Error(res.data?.error || "Invalid verification code.");
+      }
+      setStatus((prev) => ({ ...prev, emailVerified: true }));
+      setSuccessMsg("Email verified successfully!");
       setTimeout(() => {
         setCurrentStep(2);
         setSuccessMsg(null);
       }, 1000);
     } catch (err) {
-      setErrorMsg(err.response?.data?.error || 'Invalid email verification code.');
+      setErrorMsg(
+        err.response?.data?.error || "Invalid email verification code.",
+      );
     } finally {
       setLoading(false);
     }
@@ -97,9 +116,14 @@ const VerifyIdentity = () => {
     setSuccessMsg(null);
     try {
       const res = await auth.resendVerification({ email: recruiter.email });
-      setSuccessMsg(res.data?.message || 'Verification link & code resent! Please check your inbox.');
+      setSuccessMsg(
+        res.data?.message ||
+          "Verification link & code resent! Please check your inbox.",
+      );
     } catch (err) {
-      setErrorMsg(err.response?.data?.error || 'Failed to resend verification link.');
+      setErrorMsg(
+        err.response?.data?.error || "Failed to resend verification link.",
+      );
     } finally {
       setLoading(false);
     }
@@ -109,7 +133,7 @@ const VerifyIdentity = () => {
   const handleSendPhoneOTP = async () => {
     const targetPhone = phoneNumber || recruiter?.phone_number;
     if (!targetPhone) {
-      setErrorMsg('Please enter a valid phone number.');
+      setErrorMsg("Please enter a valid phone number.");
       return;
     }
     setLoading(true);
@@ -124,9 +148,14 @@ const VerifyIdentity = () => {
       if (res.data?.data?.dojahScreening) {
         setDojahCarrierData(res.data.data.dojahScreening);
       }
-      setSuccessMsg(res.data?.message || 'Verification code sent to your phone number!');
+      setSuccessMsg(
+        res.data?.message || "Verification code sent to your phone number!",
+      );
     } catch (err) {
-      setErrorMsg(err.response?.data?.error || 'Failed to send phone verification code. Please check the number.');
+      setErrorMsg(
+        err.response?.data?.error ||
+          "Failed to send phone verification code. Please check the number.",
+      );
     } finally {
       setLoading(false);
     }
@@ -135,7 +164,7 @@ const VerifyIdentity = () => {
   const handleVerifyPhoneOTP = async (e) => {
     if (e) e.preventDefault();
     if (!phoneOtp || phoneOtp.length !== 6) {
-      setErrorMsg('Please enter the 6-digit phone verification code.');
+      setErrorMsg("Please enter the 6-digit phone verification code.");
       return;
     }
     setLoading(true);
@@ -143,14 +172,19 @@ const VerifyIdentity = () => {
     setSuccessMsg(null);
     try {
       await verifyApi.verifyPhoneOTP({ otp: phoneOtp });
-      setStatus(prev => ({ ...prev, phoneVerified: true }));
-      setSuccessMsg('Phone number verified successfully with Dojah carrier screening!');
+      setStatus((prev) => ({ ...prev, phoneVerified: true }));
+      setSuccessMsg(
+        "Phone number verified successfully with Dojah carrier screening!",
+      );
       setTimeout(() => {
         setCurrentStep(3);
         setSuccessMsg(null);
       }, 1000);
     } catch (err) {
-      setErrorMsg(err.response?.data?.error || 'Invalid or expired phone verification code.');
+      setErrorMsg(
+        err.response?.data?.error ||
+          "Invalid or expired phone verification code.",
+      );
     } finally {
       setLoading(false);
     }
@@ -163,36 +197,51 @@ const VerifyIdentity = () => {
     setErrorMsg(null);
     setSuccessMsg(null);
     try {
-      await verifyApi.verifyIdentity({ type: idType.toLowerCase(), number: idNumber });
-      setStatus(prev => ({ ...prev, identityVerified: true }));
+      await verifyApi.verifyIdentity({
+        type: idType.toLowerCase(),
+        number: idNumber,
+      });
+      setStatus((prev) => ({ ...prev, identityVerified: true }));
       setSuccessMsg(`${idType} registry match verified!`);
       setTimeout(() => {
         setCurrentStep(4);
         setSuccessMsg(null);
       }, 1000);
     } catch (err) {
-      setErrorMsg(err.response?.data?.error || `${idType} verification failed. Check the 11-digit number.`);
+      setErrorMsg(
+        err.response?.data?.error ||
+          `${idType} verification failed. Check the 11-digit number.`,
+      );
     } finally {
       setLoading(false);
     }
   };
 
   // ── Step 4 Handlers (Liveness & Face Verification) ─────────────────────────
-  const handleLivenessCompleted = async (base64Image) => {
-    setLiveSelfieBase64(base64Image);
+  // FaceLivenessCapture now hands back { frames: [f1, f2, f3] } — three
+  // genuinely distinct frames captured across the live challenge, instead of
+  // a single static image. The backend independently decides the reference
+  // photo to match against (the recruiter's own government-ID photo from
+  // their NIN/BVN lookup) — the client never gets to choose what it's
+  // "matched" against.
+  const handleLivenessCompleted = async ({ frames }) => {
+    setLiveSelfieBase64(frames?.[frames.length - 1] || null);
     setLoading(true);
     setErrorMsg(null);
     setSuccessMsg(null);
 
     try {
-      await verifyApi.verifyFace({
-        selfieBase64: base64Image,
-        referencePhotoBase64: base64Image
-      });
-      setStatus(prev => ({ ...prev, faceVerified: true }));
-      setSuccessMsg('Facial biometric verification passed successfully!');
+      const res = await verifyApi.verifyFace({ frames });
+      setStatus((prev) => ({ ...prev, faceVerified: true }));
+      setSuccessMsg(
+        res.data?.message ||
+          "Facial biometric verification passed successfully!",
+      );
     } catch (err) {
-      setErrorMsg(err.response?.data?.error || 'Facial verification failed. Please try capturing again with good lighting.');
+      setErrorMsg(
+        err.response?.data?.error ||
+          "Facial verification failed. Please try capturing again with good lighting.",
+      );
     } finally {
       setLoading(false);
     }
@@ -209,14 +258,19 @@ const VerifyIdentity = () => {
                 Step 1: Recruiter Email Verification
               </h3>
               <p className="text-sm text-gray-500 mt-1">
-                We sent an activation link and a 6-digit code to your email. Click the link in your email or enter the code below:
+                We sent an activation link and a 6-digit code to your email.
+                Click the link in your email or enter the code below:
               </p>
             </div>
 
             <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm flex justify-between items-center">
               <div>
-                <p className="text-xs text-gray-400 font-semibold uppercase">Email Address</p>
-                <p className="text-sm font-bold text-gray-800">{recruiter?.email || 'Your registered email'}</p>
+                <p className="text-xs text-gray-400 font-semibold uppercase">
+                  Email Address
+                </p>
+                <p className="text-sm font-bold text-gray-800">
+                  {recruiter?.email || "Your registered email"}
+                </p>
               </div>
               {status.emailVerified ? (
                 <span className="text-xs font-bold text-emerald-700 bg-emerald-100 px-3 py-1 rounded-full flex items-center gap-1">
@@ -232,7 +286,9 @@ const VerifyIdentity = () => {
             {status.emailVerified ? (
               <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-800 flex items-center gap-3">
                 <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
-                <span className="text-sm font-semibold">Your email is verified and screened against risk databases.</span>
+                <span className="text-sm font-semibold">
+                  Your email is verified and screened against risk databases.
+                </span>
               </div>
             ) : (
               <div className="space-y-4 pt-2">
@@ -246,7 +302,9 @@ const VerifyIdentity = () => {
                       maxLength="6"
                       placeholder="123456"
                       value={emailOtp}
-                      onChange={(e) => setEmailOtp(e.target.value.replace(/\D/g, ''))}
+                      onChange={(e) =>
+                        setEmailOtp(e.target.value.replace(/\D/g, ""))
+                      }
                       className="w-40 px-3 py-2 text-center text-lg font-mono tracking-widest border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-indigo-500"
                     />
                     <button
@@ -254,14 +312,14 @@ const VerifyIdentity = () => {
                       disabled={loading || emailOtp.length !== 6}
                       className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg text-sm font-bold shadow-sm transition"
                     >
-                      {loading ? 'Verifying...' : 'Confirm Code'}
+                      {loading ? "Verifying..." : "Confirm Code"}
                     </button>
                   </div>
                 </form>
 
                 <div className="flex items-center gap-3 pt-2">
-                  <button 
-                    onClick={handleResendEmail} 
+                  <button
+                    onClick={handleResendEmail}
                     disabled={loading}
                     className="text-xs font-bold text-indigo-600 hover:text-indigo-700 flex items-center gap-1.5"
                   >
@@ -287,7 +345,8 @@ const VerifyIdentity = () => {
                 Step 2: Phone Verification via OTP (Dojah)
               </h3>
               <p className="text-sm text-gray-500 mt-1">
-                Cross-references carrier network and delivers an OTP to verify phone ownership.
+                Cross-references carrier network and delivers an OTP to verify
+                phone ownership.
               </p>
             </div>
 
@@ -296,7 +355,9 @@ const VerifyIdentity = () => {
                 <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
                 <div>
                   <p className="text-sm font-bold">Phone Number Verified!</p>
-                  <p className="text-xs text-emerald-700">{recruiter?.phone_number || phoneNumber}</p>
+                  <p className="text-xs text-emerald-700">
+                    {recruiter?.phone_number || phoneNumber}
+                  </p>
                 </div>
               </div>
             ) : (
@@ -320,13 +381,20 @@ const VerifyIdentity = () => {
                       disabled={loading || !phoneNumber}
                       className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold shadow-sm transition"
                     >
-                      {loading ? 'Sending...' : phoneOtpSent ? 'Resend OTP' : 'Send Phone OTP'}
+                      {loading
+                        ? "Sending..."
+                        : phoneOtpSent
+                          ? "Resend OTP"
+                          : "Send Phone OTP"}
                     </button>
                   </div>
                 </div>
 
                 {phoneOtpSent && (
-                  <form onSubmit={handleVerifyPhoneOTP} className="space-y-3 pt-2 bg-indigo-50/50 p-4 rounded-xl border border-indigo-100">
+                  <form
+                    onSubmit={handleVerifyPhoneOTP}
+                    className="space-y-3 pt-2 bg-indigo-50/50 p-4 rounded-xl border border-indigo-100"
+                  >
                     <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider">
                       Enter 6-Digit SMS Verification Code
                     </label>
@@ -336,7 +404,9 @@ const VerifyIdentity = () => {
                         maxLength="6"
                         placeholder="123456"
                         value={phoneOtp}
-                        onChange={(e) => setPhoneOtp(e.target.value.replace(/\D/g, ''))}
+                        onChange={(e) =>
+                          setPhoneOtp(e.target.value.replace(/\D/g, ""))
+                        }
                         className="w-36 px-3 py-2 text-center text-lg font-mono tracking-widest border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-indigo-500 bg-white"
                         autoFocus
                       />
@@ -345,7 +415,7 @@ const VerifyIdentity = () => {
                         disabled={loading || phoneOtp.length !== 6}
                         className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold shadow-sm transition"
                       >
-                        {loading ? 'Verifying...' : 'Verify Phone OTP'}
+                        {loading ? "Verifying..." : "Verify Phone OTP"}
                       </button>
                       <button
                         type="button"
@@ -377,42 +447,59 @@ const VerifyIdentity = () => {
                 Step 3: Government ID Lookup
               </h3>
               <p className="text-sm text-gray-500 mt-1">
-                Validate your identity against Nigerian government registries (NIN or BVN).
+                Validate your identity against Nigerian government registries
+                (NIN or BVN).
               </p>
             </div>
-            
+
             <div className="flex space-x-6">
               <label className="flex items-center text-sm font-medium text-gray-700 cursor-pointer">
-                <input type="radio" name="idType" value="NIN" checked={idType === 'NIN'} onChange={() => setIdType('NIN')} className="mr-2 text-indigo-600" />
+                <input
+                  type="radio"
+                  name="idType"
+                  value="NIN"
+                  checked={idType === "NIN"}
+                  onChange={() => setIdType("NIN")}
+                  className="mr-2 text-indigo-600"
+                />
                 National Identity Number (NIN)
               </label>
               <label className="flex items-center text-sm font-medium text-gray-700 cursor-pointer">
-                <input type="radio" name="idType" value="BVN" checked={idType === 'BVN'} onChange={() => setIdType('BVN')} className="mr-2 text-indigo-600" />
+                <input
+                  type="radio"
+                  name="idType"
+                  value="BVN"
+                  checked={idType === "BVN"}
+                  onChange={() => setIdType("BVN")}
+                  className="mr-2 text-indigo-600"
+                />
                 Bank Verification Number (BVN)
               </label>
             </div>
-            
-            <input 
-              type="text" 
+
+            <input
+              type="text"
               maxLength={11}
-              placeholder={`Enter your 11-digit ${idType}`} 
+              placeholder={`Enter your 11-digit ${idType}`}
               value={idNumber}
-              onChange={(e) => setIdNumber(e.target.value.replace(/\D/g, ''))}
-              className="block w-full max-w-sm px-4 py-2.5 border border-gray-300 rounded-lg shadow-sm text-base font-mono focus:ring-2 focus:ring-indigo-500" 
+              onChange={(e) => setIdNumber(e.target.value.replace(/\D/g, ""))}
+              className="block w-full max-w-sm px-4 py-2.5 border border-gray-300 rounded-lg shadow-sm text-base font-mono focus:ring-2 focus:ring-indigo-500"
             />
 
             {status.identityVerified ? (
               <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-800 flex items-center gap-3">
                 <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
-                <span className="text-sm font-semibold">Government Identity Verified</span>
+                <span className="text-sm font-semibold">
+                  Government Identity Verified
+                </span>
               </div>
             ) : (
-              <button 
-                onClick={handleVerifyIdentity} 
+              <button
+                onClick={handleVerifyIdentity}
                 disabled={loading || idNumber.length < 11}
                 className="bg-indigo-600 text-white px-5 py-2.5 rounded-lg text-sm font-bold hover:bg-indigo-700 disabled:opacity-50 transition"
               >
-                {loading ? 'Checking Registry...' : `Verify ${idType}`}
+                {loading ? "Checking Registry..." : `Verify ${idType}`}
               </button>
             )}
           </div>
@@ -422,31 +509,38 @@ const VerifyIdentity = () => {
         return (
           <div className="space-y-5">
             <div>
-              <h3 className="text-lg font-bold text-gray-900">Step 4: Live Biometric Face Capture</h3>
+              <h3 className="text-lg font-bold text-gray-900">
+                Step 4: Live Biometric Face Capture
+              </h3>
               <p className="text-sm text-gray-500 mt-1">
-                Perform a live face scan to confirm your identity matches your verified credentials.
+                Perform a live face scan to confirm your identity matches your
+                verified credentials.
               </p>
             </div>
-            
+
             {status.faceVerified ? (
               <div className="bg-emerald-50 border border-emerald-200 p-8 rounded-2xl text-center space-y-4">
                 <div className="w-14 h-14 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto">
                   <CheckCircle2 className="w-8 h-8" />
                 </div>
-                <h4 className="font-extrabold text-emerald-950 text-xl">Recruiter Identity Fully Verified!</h4>
+                <h4 className="font-extrabold text-emerald-950 text-xl">
+                  Recruiter Identity Fully Verified!
+                </h4>
                 <p className="text-sm text-emerald-700 max-w-md mx-auto">
-                  Your facial biometric verification is complete and recorded in PostgreSQL. You are now authorized to register verified companies and post genuine job advertisements.
+                  Your facial biometric verification is complete and recorded in
+                  PostgreSQL. You are now authorized to register verified
+                  companies and post genuine job advertisements.
                 </p>
                 <div className="pt-4 flex justify-center gap-3">
-                  <Link 
-                    to="/recruiter/companies/new" 
+                  <Link
+                    to="/recruiter/companies/new"
                     className="inline-flex items-center gap-2 px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-sm shadow-md transition"
                   >
                     <span>Register Your Company</span>
                     <ArrowRight className="w-4 h-4" />
                   </Link>
-                  <Link 
-                    to="/recruiter/dashboard" 
+                  <Link
+                    to="/recruiter/dashboard"
                     className="inline-flex items-center px-5 py-3 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-semibold rounded-xl text-sm transition"
                   >
                     Dashboard
@@ -454,7 +548,9 @@ const VerifyIdentity = () => {
                 </div>
               </div>
             ) : (
-              <FaceLivenessCapture onCaptureComplete={handleLivenessCompleted} />
+              <FaceLivenessCapture
+                onCaptureComplete={handleLivenessCompleted}
+              />
             )}
           </div>
         );
@@ -467,8 +563,10 @@ const VerifyIdentity = () => {
   return (
     <div className="max-w-3xl mx-auto space-y-6">
       <div className="bg-white p-8 rounded-2xl shadow-sm border border-gray-200">
-        <h1 className="text-2xl font-black text-gray-900 mb-6 tracking-tight">Recruiter Identity Verification</h1>
-        
+        <h1 className="text-2xl font-black text-gray-900 mb-6 tracking-tight">
+          Recruiter Identity Verification
+        </h1>
+
         <VerificationProgress {...status} />
 
         {errorMsg && (
@@ -493,16 +591,21 @@ const VerifyIdentity = () => {
         </div>
 
         <div className="mt-6 flex justify-between">
-          <button 
-            onClick={() => setCurrentStep(prev => Math.max(1, prev - 1))}
+          <button
+            onClick={() => setCurrentStep((prev) => Math.max(1, prev - 1))}
             disabled={currentStep === 1}
             className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
           >
             Previous Step
           </button>
-          <button 
-            onClick={() => setCurrentStep(prev => Math.min(4, prev + 1))}
-            disabled={currentStep === 4 || (currentStep === 1 && !status.emailVerified) || (currentStep === 2 && !status.phoneVerified) || (currentStep === 3 && !status.identityVerified)}
+          <button
+            onClick={() => setCurrentStep((prev) => Math.min(4, prev + 1))}
+            disabled={
+              currentStep === 4 ||
+              (currentStep === 1 && !status.emailVerified) ||
+              (currentStep === 2 && !status.phoneVerified) ||
+              (currentStep === 3 && !status.identityVerified)
+            }
             className="px-5 py-2 bg-indigo-600 border border-transparent rounded-lg text-sm font-bold text-white hover:bg-indigo-700 disabled:opacity-50"
           >
             Next Step

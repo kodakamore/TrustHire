@@ -1,61 +1,68 @@
-import React, { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { auth } from '../../services/api';
-import { Mail, CheckCircle2, ArrowRight, RefreshCw, KeyRound, ShieldCheck } from 'lucide-react';
+import React, { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { auth } from "../../services/api";
+import {
+  Mail,
+  CheckCircle2,
+  ArrowRight,
+  RefreshCw,
+  KeyRound,
+  ShieldCheck,
+} from "lucide-react";
 
 const Register = () => {
   const navigate = useNavigate();
   const [formData, setFormData] = useState({
-    firstName: '',
-    lastName: '',
-    email: '',
-    phone: '',
-    password: '',
-    confirmPassword: '',
+    firstName: "",
+    lastName: "",
+    email: "",
+    phone: "",
+    password: "",
+    confirmPassword: "",
   });
   const [errors, setErrors] = useState({});
   const [isLoading, setIsLoading] = useState(false);
-  const [apiError, setApiError] = useState('');
+  const [apiError, setApiError] = useState("");
 
   // Post-registration email verification state
   const [awaitingVerification, setAwaitingVerification] = useState(false);
-  const [registeredEmail, setRegisteredEmail] = useState('');
-  const [emailOtp, setEmailOtp] = useState('');
+  const [registeredEmail, setRegisteredEmail] = useState("");
+  const [emailOtp, setEmailOtp] = useState("");
   const [otpLoading, setOtpLoading] = useState(false);
-  const [otpError, setOtpError] = useState('');
-  const [otpSuccess, setOtpSuccess] = useState('');
+  const [otpError, setOtpError] = useState("");
+  const [otpSuccess, setOtpSuccess] = useState("");
   const [resendCooldown, setResendCooldown] = useState(0);
-  const [debugOtp, setDebugOtp] = useState('');
-  const [verificationLink, setVerificationLink] = useState('');
+  const [debugOtp, setDebugOtp] = useState("");
+  const [verificationLink, setVerificationLink] = useState("");
 
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
     if (errors[e.target.name]) {
-      setErrors({ ...errors, [e.target.name]: '' });
+      setErrors({ ...errors, [e.target.name]: "" });
     }
   };
 
   const validate = () => {
     const newErrors = {};
-    if (!formData.firstName) newErrors.firstName = 'First name is required';
-    if (!formData.lastName) newErrors.lastName = 'Last name is required';
+    if (!formData.firstName) newErrors.firstName = "First name is required";
+    if (!formData.lastName) newErrors.lastName = "Last name is required";
     if (!formData.email) {
-      newErrors.email = 'Email is required';
+      newErrors.email = "Email is required";
     } else if (!/\S+@\S+\.\S+/.test(formData.email)) {
-      newErrors.email = 'Email is invalid';
+      newErrors.email = "Email is invalid";
     }
     if (!formData.phone) {
-      newErrors.phone = 'Phone is required';
+      newErrors.phone = "Phone is required";
     } else if (!/^\+?[\d\s-]{10,}$/.test(formData.phone)) {
-      newErrors.phone = 'Phone is invalid';
+      newErrors.phone = "Phone is invalid";
     }
     if (!formData.password) {
-      newErrors.password = 'Password is required';
+      newErrors.password = "Password is required";
     } else if (formData.password.length < 8) {
-      newErrors.password = 'Password must be at least 8 characters';
+      newErrors.password = "Password must be at least 8 characters";
     }
     if (formData.password !== formData.confirmPassword) {
-      newErrors.confirmPassword = 'Passwords do not match';
+      newErrors.confirmPassword = "Passwords do not match";
     }
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
@@ -64,21 +71,23 @@ const Register = () => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!validate()) return;
-    
+
     setIsLoading(true);
-    setApiError('');
+    setApiError("");
     try {
       const response = await auth.register(formData);
       if (response.data && response.data.success) {
         setRegisteredEmail(formData.email);
-        setDebugOtp(response.data.data?.debugOtp || '');
-        setVerificationLink(response.data.data?.verificationLink || '');
+        setDebugOtp(response.data.data?.debugOtp || "");
+        setVerificationLink(response.data.data?.verificationLink || "");
         setAwaitingVerification(true);
       } else {
-        setApiError('Registration failed. Please try again.');
+        setApiError("Registration failed. Please try again.");
       }
     } catch (err) {
-      const msg = err.response?.data?.error || 'Registration failed. Please check your details.';
+      const msg =
+        err.response?.data?.error ||
+        "Registration failed. Please check your details.";
       setApiError(msg);
     } finally {
       setIsLoading(false);
@@ -88,13 +97,13 @@ const Register = () => {
   const handleVerifyOtp = async (e) => {
     e.preventDefault();
     if (!emailOtp || emailOtp.trim().length !== 6) {
-      setOtpError('Please enter the 6-digit code sent to your email.');
+      setOtpError("Please enter the 6-digit code sent to your email.");
       return;
     }
 
     setOtpLoading(true);
-    setOtpError('');
-    setOtpSuccess('');
+    setOtpError("");
+    setOtpSuccess("");
 
     try {
       const res = await auth.verifyEmailOtp({
@@ -103,16 +112,30 @@ const Register = () => {
       });
 
       if (res.data?.success && res.data.data?.token) {
-        localStorage.setItem('token', res.data.data.token);
-        setOtpSuccess('Email verified successfully! Redirecting to identity onboarding...');
+        localStorage.setItem("token", res.data.data.token);
+        setOtpSuccess(
+          "Email verified successfully! Redirecting to identity onboarding...",
+        );
         setTimeout(() => {
-          navigate('/recruiter/verify');
+          navigate("/recruiter/verify");
+        }, 1200);
+      } else if (res.data?.success && res.data?.alreadyVerified) {
+        setOtpSuccess(
+          "This email is already verified. Redirecting to sign in...",
+        );
+        setTimeout(() => {
+          navigate("/recruiter/login");
         }, 1200);
       } else {
-        setOtpError(res.data?.error || 'Invalid code. Please check your email.');
+        setOtpError(
+          res.data?.error || "Invalid code. Please check your email.",
+        );
       }
     } catch (err) {
-      setOtpError(err.response?.data?.error || 'Invalid or expired code. Please try again.');
+      setOtpError(
+        err.response?.data?.error ||
+          "Invalid or expired code. Please try again.",
+      );
     } finally {
       setOtpLoading(false);
     }
@@ -120,11 +143,14 @@ const Register = () => {
 
   const handleResend = async () => {
     if (resendCooldown > 0) return;
-    setOtpError('');
-    setOtpSuccess('');
+    setOtpError("");
+    setOtpSuccess("");
     try {
       const res = await auth.resendVerification({ email: registeredEmail });
-      setOtpSuccess(res.data?.message || 'New verification code and link sent to your email!');
+      setOtpSuccess(
+        res.data?.message ||
+          "New verification code and link sent to your email!",
+      );
       if (res.data?.debugOtp) setDebugOtp(res.data.debugOtp);
       setResendCooldown(60);
       const timer = setInterval(() => {
@@ -137,7 +163,10 @@ const Register = () => {
         });
       }, 1000);
     } catch (err) {
-      setOtpError(err.response?.data?.error || 'Failed to resend code. Please try again later.');
+      setOtpError(
+        err.response?.data?.error ||
+          "Failed to resend code. Please try again later.",
+      );
     }
   };
 
@@ -191,7 +220,9 @@ const Register = () => {
                   maxLength="6"
                   placeholder="123456"
                   value={emailOtp}
-                  onChange={(e) => setEmailOtp(e.target.value.replace(/\D/g, ''))}
+                  onChange={(e) =>
+                    setEmailOtp(e.target.value.replace(/\D/g, ""))
+                  }
                   className="block w-full text-center text-2xl font-mono tracking-[0.4em] py-3 px-4 border border-gray-300 rounded-xl shadow-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
                   autoFocus
                 />
@@ -216,11 +247,14 @@ const Register = () => {
             {/* Option 2: Click link in email */}
             <div className="pt-2 border-t border-gray-100 text-center">
               <p className="text-xs text-gray-500 mb-2">
-                Or click the direct activation button inside the email delivered to your inbox.
+                Or click the direct activation button inside the email delivered
+                to your inbox.
               </p>
               {verificationLink && (
                 <div className="p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-left">
-                  <p className="text-[11px] font-semibold text-gray-600 mb-1">Direct Verification Link (Dev Mode):</p>
+                  <p className="text-[11px] font-semibold text-gray-600 mb-1">
+                    Direct Verification Link (Dev Mode):
+                  </p>
                   <a
                     href={verificationLink}
                     target="_blank"
@@ -242,8 +276,12 @@ const Register = () => {
                 disabled={resendCooldown > 0}
                 className="font-bold text-indigo-600 hover:text-indigo-500 disabled:text-gray-400 flex items-center gap-1"
               >
-                <RefreshCw className={`w-3.5 h-3.5 ${resendCooldown > 0 ? 'animate-spin' : ''}`} />
-                {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : 'Resend Email'}
+                <RefreshCw
+                  className={`w-3.5 h-3.5 ${resendCooldown > 0 ? "animate-spin" : ""}`}
+                />
+                {resendCooldown > 0
+                  ? `Resend in ${resendCooldown}s`
+                  : "Resend Email"}
               </button>
             </div>
 
@@ -271,8 +309,11 @@ const Register = () => {
           Create Recruiter Account
         </h2>
         <p className="mt-2 text-center text-sm text-gray-600">
-          Or{' '}
-          <Link to="/recruiter/login" className="font-medium text-indigo-600 hover:text-indigo-500">
+          Or{" "}
+          <Link
+            to="/recruiter/login"
+            className="font-medium text-indigo-600 hover:text-indigo-500"
+          >
             sign in to your existing account
           </Link>
         </p>
@@ -282,42 +323,59 @@ const Register = () => {
         <div className="bg-white py-8 px-4 shadow-xl sm:rounded-2xl sm:px-10 border border-gray-100">
           <form className="space-y-6" onSubmit={handleSubmit}>
             {apiError && (
-              <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm" role="alert">
+              <div
+                className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm"
+                role="alert"
+              >
                 <span className="block sm:inline">{apiError}</span>
               </div>
             )}
-            
+
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700">First Name</label>
+                <label className="block text-sm font-medium text-gray-700">
+                  First Name
+                </label>
                 <div className="mt-1">
                   <input
                     name="firstName"
                     type="text"
                     value={formData.firstName}
                     onChange={handleChange}
-                    className={`appearance-none block w-full px-3 py-2 border ${errors.firstName ? 'border-red-300' : 'border-gray-300'} rounded-lg shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm`}
+                    className={`appearance-none block w-full px-3 py-2 border ${errors.firstName ? "border-red-300" : "border-gray-300"} rounded-lg shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm`}
                   />
-                  {errors.firstName && <p className="mt-1 text-xs text-red-500">{errors.firstName}</p>}
+                  {errors.firstName && (
+                    <p className="mt-1 text-xs text-red-500">
+                      {errors.firstName}
+                    </p>
+                  )}
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700">Last Name</label>
+                <label className="block text-sm font-medium text-gray-700">
+                  Last Name
+                </label>
                 <div className="mt-1">
                   <input
                     name="lastName"
                     type="text"
                     value={formData.lastName}
                     onChange={handleChange}
-                    className={`appearance-none block w-full px-3 py-2 border ${errors.lastName ? 'border-red-300' : 'border-gray-300'} rounded-lg shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm`}
+                    className={`appearance-none block w-full px-3 py-2 border ${errors.lastName ? "border-red-300" : "border-gray-300"} rounded-lg shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm`}
                   />
-                  {errors.lastName && <p className="mt-1 text-xs text-red-500">{errors.lastName}</p>}
+                  {errors.lastName && (
+                    <p className="mt-1 text-xs text-red-500">
+                      {errors.lastName}
+                    </p>
+                  )}
                 </div>
               </div>
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700">Email address</label>
+              <label className="block text-sm font-medium text-gray-700">
+                Email address
+              </label>
               <div className="mt-1">
                 <input
                   name="email"
@@ -325,17 +383,22 @@ const Register = () => {
                   value={formData.email}
                   onChange={handleChange}
                   placeholder="you@example.com"
-                  className={`appearance-none block w-full px-3 py-2 border ${errors.email ? 'border-red-300' : 'border-gray-300'} rounded-lg shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm`}
+                  className={`appearance-none block w-full px-3 py-2 border ${errors.email ? "border-red-300" : "border-gray-300"} rounded-lg shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm`}
                 />
-                {errors.email && <p className="mt-1 text-xs text-red-500">{errors.email}</p>}
+                {errors.email && (
+                  <p className="mt-1 text-xs text-red-500">{errors.email}</p>
+                )}
               </div>
               <p className="mt-1 text-[11px] text-gray-500">
-                A verification link and 6-digit code will be sent to this email upon registration.
+                A verification link and 6-digit code will be sent to this email
+                upon registration.
               </p>
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700">Phone Number</label>
+              <label className="block text-sm font-medium text-gray-700">
+                Phone Number
+              </label>
               <div className="mt-1">
                 <input
                   name="phone"
@@ -343,37 +406,49 @@ const Register = () => {
                   placeholder="e.g. 08012345678"
                   value={formData.phone}
                   onChange={handleChange}
-                  className={`appearance-none block w-full px-3 py-2 border ${errors.phone ? 'border-red-300' : 'border-gray-300'} rounded-lg shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm`}
+                  className={`appearance-none block w-full px-3 py-2 border ${errors.phone ? "border-red-300" : "border-gray-300"} rounded-lg shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm`}
                 />
-                {errors.phone && <p className="mt-1 text-xs text-red-500">{errors.phone}</p>}
+                {errors.phone && (
+                  <p className="mt-1 text-xs text-red-500">{errors.phone}</p>
+                )}
               </div>
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700">Password</label>
+              <label className="block text-sm font-medium text-gray-700">
+                Password
+              </label>
               <div className="mt-1">
                 <input
                   name="password"
                   type="password"
                   value={formData.password}
                   onChange={handleChange}
-                  className={`appearance-none block w-full px-3 py-2 border ${errors.password ? 'border-red-300' : 'border-gray-300'} rounded-lg shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm`}
+                  className={`appearance-none block w-full px-3 py-2 border ${errors.password ? "border-red-300" : "border-gray-300"} rounded-lg shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm`}
                 />
-                {errors.password && <p className="mt-1 text-xs text-red-500">{errors.password}</p>}
+                {errors.password && (
+                  <p className="mt-1 text-xs text-red-500">{errors.password}</p>
+                )}
               </div>
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700">Confirm Password</label>
+              <label className="block text-sm font-medium text-gray-700">
+                Confirm Password
+              </label>
               <div className="mt-1">
                 <input
                   name="confirmPassword"
                   type="password"
                   value={formData.confirmPassword}
                   onChange={handleChange}
-                  className={`appearance-none block w-full px-3 py-2 border ${errors.confirmPassword ? 'border-red-300' : 'border-gray-300'} rounded-lg shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm`}
+                  className={`appearance-none block w-full px-3 py-2 border ${errors.confirmPassword ? "border-red-300" : "border-gray-300"} rounded-lg shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm`}
                 />
-                {errors.confirmPassword && <p className="mt-1 text-xs text-red-500">{errors.confirmPassword}</p>}
+                {errors.confirmPassword && (
+                  <p className="mt-1 text-xs text-red-500">
+                    {errors.confirmPassword}
+                  </p>
+                )}
               </div>
             </div>
 
@@ -383,7 +458,9 @@ const Register = () => {
                 disabled={isLoading}
                 className="w-full flex justify-center py-3 px-4 border border-transparent rounded-xl shadow-md text-sm font-bold text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 transition"
               >
-                {isLoading ? 'Creating account & sending email...' : 'Create Account'}
+                {isLoading
+                  ? "Creating account & sending email..."
+                  : "Create Account"}
               </button>
             </div>
           </form>

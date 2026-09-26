@@ -1,5 +1,8 @@
-import { query } from '../config/database.js';
-import { checkEmailDomainMatch, checkDirectorMatch } from '../utils/domainHelper.js';
+import { query } from "../config/database.js";
+import {
+  checkEmailDomainMatch,
+  checkDirectorMatch,
+} from "../utils/domainHelper.js";
 
 /**
  * TrustHire Ideal 4-Pillar Verification Decision Engine:
@@ -20,46 +23,60 @@ export const processJobVerification = async (jobAd, recruiter, company) => {
   // =========================================================================
   if (!recruiter.is_email_verified) {
     flags.push({
-      type: 'recruiter_email_not_verified',
-      severity: 'critical',
-      reason: 'Recruiter email has not been verified.'
+      type: "recruiter_email_not_verified",
+      severity: "critical",
+      reason: "Recruiter email has not been verified.",
     });
   }
   if (!recruiter.is_phone_verified) {
     flags.push({
-      type: 'recruiter_phone_not_verified',
-      severity: 'critical',
-      reason: 'Recruiter phone number has not been verified.'
+      type: "recruiter_phone_not_verified",
+      severity: "critical",
+      reason: "Recruiter phone number has not been verified.",
     });
   }
   if (!recruiter.is_identity_verified) {
     flags.push({
-      type: 'recruiter_identity_not_verified',
-      severity: 'critical',
-      reason: 'Recruiter government identity (NIN/BVN) has not been verified.'
+      type: "recruiter_identity_not_verified",
+      severity: "critical",
+      reason: "Recruiter government identity (NIN/BVN) has not been verified.",
     });
   }
   if (!recruiter.is_face_verified) {
     flags.push({
-      type: 'recruiter_face_not_verified',
-      severity: 'critical',
-      reason: 'Recruiter has not completed biometric facial verification / liveness check.'
+      type: "recruiter_face_not_verified",
+      severity: "critical",
+      reason:
+        "Recruiter has not completed biometric facial verification / liveness check.",
     });
   }
 
-  // Check face match score threshold
-  const minFaceScore = parseFloat(process.env.MIN_FACE_MATCH_SCORE || '85.0');
+  // Check face match outcome (see verify.controller.js#verifyFace for how
+  // this row is written — the confidence score lives under
+  // raw_response.match.data.entity.confidence_value).
+  const minFaceScore = parseFloat(process.env.MIN_FACE_MATCH_SCORE || "85.0");
   const faceCheck = await query(
-    'SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1',
-    [recruiter.id, 'face_match']
+    "SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1",
+    [recruiter.id, "face_match"],
   );
-  if (faceCheck.rows[0]?.raw_response?.match_score !== undefined) {
-    const matchScore = faceCheck.rows[0].raw_response.match_score;
-    if (matchScore < minFaceScore) {
+  const faceCheckRow = faceCheck.rows[0];
+  if (faceCheckRow) {
+    const matchScore =
+      faceCheckRow.raw_response?.match?.data?.entity?.confidence_value;
+    if (faceCheckRow.is_successful === null) {
+      // Liveness passed but there was no government-ID photo on file yet to
+      // match against — this is NOT the same as a verified identity match.
       flags.push({
-        type: 'low_face_match_score',
-        severity: 'warning',
-        reason: `Face match confidence score (${matchScore}%) is below minimum threshold (${minFaceScore}%).`
+        type: "face_match_no_reference_photo",
+        severity: "warning",
+        reason:
+          "Live selfie passed the liveness check, but could not be matched against a government-ID photo (none available from the NIN/BVN lookup). Manual review recommended before treating identity as fully confirmed.",
+      });
+    } else if (typeof matchScore === "number" && matchScore < minFaceScore) {
+      flags.push({
+        type: "low_face_match_score",
+        severity: "warning",
+        reason: `Face match confidence score (${matchScore}%) is below minimum threshold (${minFaceScore}%).`,
       });
     }
   }
@@ -68,17 +85,18 @@ export const processJobVerification = async (jobAd, recruiter, company) => {
   // PILLAR 2: CORPORATE LEGITIMACY (CAC REGISTRATION)
   // =========================================================================
   if (!company.is_cac_verified) {
-    if (company.verification_status === 'manual_review') {
+    if (company.verification_status === "manual_review") {
       flags.push({
-        type: 'company_cac_manual_review',
-        severity: 'warning',
-        reason: 'Company CAC registration could not be auto-verified against Corporate Affairs Commission records.'
+        type: "company_cac_manual_review",
+        severity: "warning",
+        reason:
+          "Company CAC registration could not be auto-verified against Corporate Affairs Commission records.",
       });
     } else {
       flags.push({
-        type: 'company_cac_not_verified',
-        severity: 'critical',
-        reason: 'Company CAC registration has not been verified.'
+        type: "company_cac_not_verified",
+        severity: "critical",
+        reason: "Company CAC registration has not been verified.",
       });
     }
   }
@@ -88,77 +106,106 @@ export const processJobVerification = async (jobAd, recruiter, company) => {
   // =========================================================================
   if (!company.is_domain_verified) {
     flags.push({
-      type: 'company_website_not_verified',
-      severity: 'warning',
-      reason: 'Company website domain has not been verified via WhoisXML & APIVoid.'
+      type: "company_website_not_verified",
+      severity: "warning",
+      reason:
+        "Company website domain has not been verified via WhoisXML & APIVoid.",
     });
   }
 
-  // Fetch detailed WhoisXML and APIVoid checks for this company
-  const [whoisCheck, apivoidCheck, cacCheck] = await Promise.all([
+  // Fetch detailed WhoisXML, APIVoid, CAC and website-content checks for this company
+  const [whoisCheck, apivoidCheck, cacCheck, contentCheck] = await Promise.all([
     query(
-      'SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1',
-      [company.id, 'whois']
+      "SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1",
+      [company.id, "whois"],
     ),
     query(
-      'SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1',
-      [company.id, 'domain_reputation']
+      "SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1",
+      [company.id, "domain_reputation"],
     ),
     query(
-      'SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1',
-      [company.id, 'cac']
-    )
+      "SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1",
+      [company.id, "cac"],
+    ),
+    query(
+      "SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1",
+      [company.id, "website_content"],
+    ),
   ]);
 
   const whoisData = whoisCheck.rows[0]?.raw_response;
   const apivoidData = apivoidCheck.rows[0]?.raw_response;
   const cacData = cacCheck.rows[0]?.raw_response;
+  const contentData = contentCheck.rows[0]?.raw_response;
 
   // Evaluate WhoisXML Domain Age
   if (whoisData) {
-    const minDomainAge = parseInt(process.env.MIN_DOMAIN_AGE_DAYS || '30', 10);
+    const minDomainAge = parseInt(process.env.MIN_DOMAIN_AGE_DAYS || "30", 10);
     const domainAge = whoisData.domainAgeDays ?? whoisData.domain_age_days;
 
     if (domainAge !== undefined && domainAge < minDomainAge) {
       flags.push({
-        type: 'domain_too_new',
-        severity: domainAge < 7 ? 'critical' : 'warning',
-        reason: `Company website domain is only ${domainAge} days old (minimum requirement: ${minDomainAge} days). Newly created domains have high fraud probability.`
+        type: "domain_too_new",
+        severity: domainAge < 7 ? "critical" : "warning",
+        reason: `Company website domain is only ${domainAge} days old (minimum requirement: ${minDomainAge} days). Newly created domains have high fraud probability.`,
       });
     }
 
     if (whoisData.isPrivacyProtected) {
       flags.push({
-        type: 'domain_privacy_protected',
-        severity: 'info',
-        reason: 'Domain registrant details are masked by WHOIS privacy protection.'
+        type: "domain_privacy_protected",
+        severity: "info",
+        reason:
+          "Domain registrant details are masked by WHOIS privacy protection.",
       });
     }
   }
 
   // Evaluate APIVoid Threat & Blacklist Screening
   if (apivoidData) {
-    const maxRiskScore = parseInt(process.env.MAX_DOMAIN_RISK_SCORE || '20', 10);
+    const maxRiskScore = parseInt(
+      process.env.MAX_DOMAIN_RISK_SCORE || "20",
+      10,
+    );
 
     if (apivoidData.isBlacklisted || apivoidData.blacklistsDetected > 0) {
       flags.push({
-        type: 'domain_threat_blacklisted',
-        severity: 'critical',
-        reason: `Company website is flagged on ${apivoidData.blacklistsDetected} cybersecurity blacklists for malicious or deceptive activity.`
+        type: "domain_threat_blacklisted",
+        severity: "critical",
+        reason: `Company website is flagged on ${apivoidData.blacklistsDetected} cybersecurity blacklists for malicious or deceptive activity.`,
       });
     } else if (apivoidData.threatScore > maxRiskScore) {
       flags.push({
-        type: 'domain_elevated_risk_score',
-        severity: 'warning',
-        reason: `Company website threat risk score (${apivoidData.threatScore}/100) exceeds safety threshold (${maxRiskScore}/100).`
+        type: "domain_elevated_risk_score",
+        severity: "warning",
+        reason: `Company website threat risk score (${apivoidData.threatScore}/100) exceeds safety threshold (${maxRiskScore}/100).`,
       });
     }
 
     if (apivoidData.sslValid === false) {
       flags.push({
-        type: 'no_ssl_certificate',
-        severity: 'warning',
-        reason: 'Company website does not possess a valid SSL/TLS certificate.'
+        type: "no_ssl_certificate",
+        severity: "warning",
+        reason: "Company website does not possess a valid SSL/TLS certificate.",
+      });
+    }
+  }
+
+  // Evaluate whether the website's own homepage actually references the
+  // claimed company — a reachable, aged, low-risk domain still proves
+  // nothing about ownership if the page never mentions the company at all.
+  if (contentData) {
+    if (contentData.success === false) {
+      flags.push({
+        type: "website_content_unreadable",
+        severity: "info",
+        reason: `Company website content could not be inspected to confirm it belongs to the company (${contentData.error || "unreachable"}).`,
+      });
+    } else if (contentData.matched === false) {
+      flags.push({
+        type: "website_content_mismatch",
+        severity: "warning",
+        reason: `The company name "${company.name}" could not be found anywhere on the claimed website's homepage. This website may not actually belong to this company.`,
       });
     }
   }
@@ -170,27 +217,39 @@ export const processJobVerification = async (jobAd, recruiter, company) => {
   const isCorporateEmailVerified = company.is_corporate_email_verified === true;
 
   // Track 2: Recruiter's primary registration email directly matches company domain
-  const emailMatch = checkEmailDomainMatch(recruiter.email, company.website_url);
+  const emailMatch = checkEmailDomainMatch(
+    recruiter.email,
+    company.website_url,
+  );
 
   // Track 3: Recruiter matched CAC corporate executive / director filings
   const isCacExecutive = company.is_cac_director_match === true;
-  const affiliates = cacData?.data?.entity?.affiliates || cacData?.data?.entity?.directors || [];
-  const directorMatch = checkDirectorMatch(recruiter.first_name, recruiter.last_name, affiliates);
+  const affiliates =
+    cacData?.data?.entity?.affiliates || cacData?.data?.entity?.directors || [];
+  const directorMatch = checkDirectorMatch(
+    recruiter.first_name,
+    recruiter.last_name,
+    affiliates,
+  );
 
-  const isDirectAffiliate = isCorporateEmailVerified || emailMatch.isMatch || isCacExecutive || directorMatch.isMatch;
+  const isDirectAffiliate =
+    isCorporateEmailVerified ||
+    emailMatch.isMatch ||
+    isCacExecutive ||
+    directorMatch.isMatch;
 
   if (!isDirectAffiliate) {
     if (emailMatch.isPublicEmail) {
       flags.push({
-        type: 'unverified_company_affiliation',
-        severity: 'warning',
-        reason: `Recruiter registered with a personal/public email (${recruiter.email}) for corporate domain (${emailMatch.websiteDomain}). Neither an official work email (@${emailMatch.websiteDomain}) nor CAC executive match has been verified. Manual authorization review required.`
+        type: "unverified_company_affiliation",
+        severity: "warning",
+        reason: `Recruiter registered with a personal/public email (${recruiter.email}) for corporate domain (${emailMatch.websiteDomain}). Neither an official work email (@${emailMatch.websiteDomain}) nor CAC executive match has been verified. Manual authorization review required.`,
       });
     } else {
       flags.push({
-        type: 'unverified_company_affiliation',
-        severity: 'warning',
-        reason: `Recruiter email domain (@${emailMatch.emailDomain}) does not match the company website domain (@${emailMatch.websiteDomain}). Manual authorization review required.`
+        type: "unverified_company_affiliation",
+        severity: "warning",
+        reason: `Recruiter email domain (@${emailMatch.emailDomain}) does not match the company website domain (@${emailMatch.websiteDomain}). Manual authorization review required.`,
       });
     }
   }
@@ -200,14 +259,14 @@ export const processJobVerification = async (jobAd, recruiter, company) => {
   // =========================================================================
   // Auto-approve ONLY if there are zero critical and zero warning flags.
   // Info flags (like domain privacy proxy) do not block auto-approval.
-  const hasCritical = flags.some(f => f.severity === 'critical');
-  const hasWarning = flags.some(f => f.severity === 'warning');
+  const hasCritical = flags.some((f) => f.severity === "critical");
+  const hasWarning = flags.some((f) => f.severity === "warning");
 
   let status;
   if (!hasCritical && !hasWarning) {
-    status = 'approved';  // 100% verified across all 4 pillars
+    status = "approved"; // 100% verified across all 4 pillars
   } else {
-    status = 'pending';   // Sent to Admin Review Queue with exact flag details
+    status = "pending"; // Sent to Admin Review Queue with exact flag details
   }
 
   return { status, flags };
