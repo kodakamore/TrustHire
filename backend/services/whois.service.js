@@ -6,8 +6,12 @@
  */
 
 import dotenv from "dotenv";
+import dns from "node:dns";
+import crypto from "node:crypto";
 import { extractDomain } from "../utils/domainHelper.js";
 dotenv.config();
+
+const dnsResolveTxt = dns.promises.resolveTxt;
 
 const isSandboxMode = () => {
   if (process.env.USE_MOCK_API === "true") return true;
@@ -314,4 +318,107 @@ export const checkWebsiteContentMatch = async (
       error: `Could not read website content: ${error.message}`,
     };
   }
+};
+
+// =============================================================================
+// DNS TXT RECORD OWNERSHIP VERIFICATION
+//
+// Everything else in this file (WHOIS age, APIVoid reputation, homepage
+// content matching) is a *heuristic* signal — evidence that's consistent
+// with genuine ownership but never actually proves it. A DNS TXT record is
+// different: only someone who can edit the domain's DNS zone (i.e. actually
+// controls the domain, at the registrar/DNS-host level) can make this check
+// pass. It's the same mechanism Google Search Console, SendGrid and many
+// other services use for "verify you own this domain."
+// =============================================================================
+
+const dnsSecret = () =>
+  process.env.DNS_VERIFY_SECRET ||
+  process.env.JWT_SECRET ||
+  "trusthire-dns-fallback-secret";
+
+/**
+ * Deterministic per-company token — regenerated from the company id each
+ * time via HMAC, so nothing new needs to be stored in the database just to
+ * hand the recruiter their verification value.
+ */
+export const getDnsVerificationToken = (companyId) => {
+  const hmac = crypto
+    .createHmac("sha256", dnsSecret())
+    .update(String(companyId))
+    .digest("hex");
+  return `trusthire-verify=${hmac.slice(0, 32)}`;
+};
+
+/**
+ * Returns the exact TXT record the recruiter needs to add at their DNS
+ * host, for display in the UI.
+ */
+export const getDnsVerificationInstructions = (websiteUrl, companyId) => {
+  const domain = extractDomain(websiteUrl);
+  return {
+    domain,
+    recordType: "TXT",
+    // A record at the domain apex (host "@") is simplest for most DNS
+    // providers; a dedicated subdomain is offered as an alternative for
+    // providers that don't allow multiple TXT records at the apex.
+    recordHost: "@ (or the bare domain)",
+    alternateRecordHost: `_trusthire-verify.${domain}`,
+    recordValue: getDnsVerificationToken(companyId),
+    instructions: `Add a TXT record for ${domain} with the value shown above at your DNS provider (e.g. Cloudflare, Namecheap, GoDaddy). DNS changes can take a few minutes up to 24-48 hours to propagate.`,
+  };
+};
+
+/**
+ * Performs the actual DNS TXT lookup and checks for the expected token.
+ * Checks both the domain apex and the dedicated _trusthire-verify
+ * subdomain, since DNS providers vary in what they allow at the apex.
+ */
+export const verifyDnsOwnership = async (websiteUrl, companyId) => {
+  const domain = extractDomain(websiteUrl);
+  if (!domain) {
+    return {
+      success: false,
+      verified: false,
+      error: "No valid website domain to check.",
+    };
+  }
+
+  const expectedToken = getDnsVerificationToken(companyId);
+  const candidates = [domain, `_trusthire-verify.${domain}`];
+  const allRecords = [];
+  let lookupError = null;
+
+  for (const host of candidates) {
+    try {
+      const records = await dnsResolveTxt(host); // string[][]
+      const flat = records.map((r) => r.join("")).filter(Boolean);
+      allRecords.push(...flat);
+    } catch (err) {
+      // ENODATA/ENOTFOUND just means no TXT records at that host — normal,
+      // not an error condition — but capture it in case BOTH candidates fail.
+      lookupError = err.code || err.message;
+    }
+  }
+
+  const verified = allRecords.some((r) => r.trim() === expectedToken);
+
+  if (allRecords.length === 0) {
+    return {
+      success: false,
+      verified: false,
+      domain,
+      error: `No TXT records found for ${domain} (or the record hasn't propagated yet). ${lookupError ? `(${lookupError})` : ""}`,
+    };
+  }
+
+  return {
+    success: true,
+    verified,
+    domain,
+    recordsFound: allRecords.length,
+    error: verified
+      ? null
+      : "A TXT record was found, but it did not match the expected TrustHire verification value.",
+  };
 };

@@ -275,15 +275,69 @@ export const verifyLiveness = async (selfieBase64) => {
     body: JSON.stringify({ image: selfieBase64 }),
   });
 
+  // Always log the raw shape (once, truncated) so a real mismatch between
+  // what Dojah actually returns and the field-name guesses below is
+  // diagnosable from server logs rather than silently swallowed.
+  if (res.success) {
+    console.log(
+      "[Dojah Liveness] raw entity:",
+      JSON.stringify(res.data?.entity)?.slice(0, 800),
+    );
+  } else {
+    console.log("[Dojah Liveness] request failed:", res.error);
+  }
+
   if (res.success && res.data?.entity) {
     const entity = res.data.entity;
-    // Normalize Dojah response
-    const faceDetected = entity.face?.detected !== false;
+
+    // Face-detected and "is actually live / not spoofed" are two DIFFERENT
+    // signals from Dojah and must not be conflated (the previous code set
+    // is_live = faceDetected, so any photo with a visible face — spoofed or
+    // not — was treated as "live"). Try several plausible locations Dojah's
+    // API may report an explicit anti-spoof verdict; if none of them are
+    // present, we leave is_live as `undefined` rather than defaulting it to
+    // true, which forces the caller to fall back to the numeric score gate.
+    const faceDetected =
+      entity.face?.detected ?? entity.face_detected ?? undefined;
+    const explicitIsLive =
+      entity.liveness?.is_live ??
+      entity.liveness?.live ??
+      entity.liveness?.status ??
+      entity.liveness_check ??
+      entity.is_live ??
+      undefined;
+
+    // Likewise, do NOT default the confidence score to a hardcoded high
+    // value when the expected field is missing — that fabricates a pass.
+    // If we genuinely cannot find a numeric score, leave it undefined so
+    // the threshold comparison in verify.controller.js fails closed.
+    const rawScore =
+      entity.liveness?.confidence ??
+      entity.liveness?.probability ??
+      entity.liveness?.score ??
+      entity.liveness_score ??
+      entity.confidence ??
+      undefined;
     const livenessScore =
-      entity.liveness?.confidence || entity.liveness_score || 95.0;
+      typeof rawScore === "number"
+        ? rawScore <= 1
+          ? rawScore * 100
+          : rawScore // normalize 0–1 probabilities to a 0–100 score
+        : undefined;
+
     res.data.entity.liveness_score = livenessScore;
-    res.data.entity.is_live = faceDetected;
-    res.data.entity.face_detected = faceDetected;
+    res.data.entity.is_live =
+      typeof explicitIsLive === "boolean" ? explicitIsLive : undefined;
+    res.data.entity.face_detected =
+      typeof faceDetected === "boolean" ? faceDetected : undefined;
+
+    if (livenessScore === undefined && explicitIsLive === undefined) {
+      console.warn(
+        "[Dojah Liveness] Could not find a recognizable score or liveness verdict field in the response above. " +
+          "The request will fail closed (rejected) rather than fabricate a pass. " +
+          "If this is unexpected, share the logged raw entity so the field-name mapping can be corrected.",
+      );
+    }
   }
 
   return res;

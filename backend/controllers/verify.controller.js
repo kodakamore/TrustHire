@@ -323,27 +323,54 @@ export const verifyFace = async (req, res) => {
       });
     }
 
-    // Use the last (final) frame as the primary capture sent for liveness
-    // and matching — it corresponds to the "hold still" step of the capture UI.
+    // Use the last (final) frame — the "hold still" capture — as the
+    // primary image for face-matching against the ID photo.
     const selfie = frameList[frameList.length - 1];
 
-    // 1. Run Dojah Liveness & Anti-spoof check
-    const livenessResult = await DojahService.verifyLiveness(selfie);
-
+    // 1. Run Dojah Liveness & Anti-spoof check on EVERY captured frame, not
+    // just the last one. A spoof attempt (e.g. a printed photo, or a phone
+    // playing a video) might get lucky and pass the check on one frame
+    // (motion blur, glare, angle) but is much less likely to pass on all
+    // three independently-captured frames across ~3 seconds. We require
+    // every frame to individually clear the bar, and use the WORST
+    // (minimum) score across frames as the representative liveness score.
     const minLiveness = parseFloat(process.env.MIN_LIVENESS_SCORE || 80.0);
-    const livenessScore = livenessResult.data?.entity?.liveness_score;
-    const isLive = livenessResult.data?.entity?.is_live;
-    const faceDetected = livenessResult.data?.entity?.face_detected;
+    const livenessResults = await Promise.all(
+      frameList.map((f) => DojahService.verifyLiveness(f)),
+    );
 
-    // The threshold and is_live/face_detected flags must actually gate the
-    // result — previously `minLiveness` was computed but never compared
-    // against anything, so a low or missing score silently passed.
+    const perFrame = livenessResults.map((r) => ({
+      score: r.data?.entity?.liveness_score,
+      isLive: r.data?.entity?.is_live,
+      faceDetected: r.data?.entity?.face_detected,
+      apiSuccess: r.success !== false,
+    }));
+
+    const numericScores = perFrame
+      .map((f) => f.score)
+      .filter((s) => typeof s === "number");
+    // Worst-case score across all frames — a single weak frame should drag
+    // the whole capture down, not be averaged away by two good ones.
+    const livenessScore =
+      numericScores.length === frameList.length
+        ? Math.min(...numericScores)
+        : undefined; // any frame missing a real score fails the whole batch closed
+
+    const allFramesPassed = perFrame.every(
+      (f) =>
+        f.apiSuccess &&
+        f.faceDetected !== false &&
+        f.isLive !== false &&
+        typeof f.score === "number" &&
+        f.score >= minLiveness,
+    );
+
     const livenessPassed =
-      livenessResult.success !== false &&
-      faceDetected !== false &&
-      isLive !== false &&
+      allFramesPassed &&
       typeof livenessScore === "number" &&
       livenessScore >= minLiveness;
+    // Kept for the response payload below (primary/last-frame result).
+    const livenessResult = livenessResults[livenessResults.length - 1];
 
     await VerificationCheck.create({
       targetId: req.user.id,
@@ -352,7 +379,12 @@ export const verifyFace = async (req, res) => {
       provider: "dojah",
       referenceId:
         livenessResult.data?.entity?.reference_id || `liveness_${Date.now()}`,
-      rawResponse: { liveness: livenessResult, frameCount: frameList.length },
+      rawResponse: {
+        liveness: livenessResults,
+        perFrame,
+        worstScore: livenessScore,
+        frameCount: frameList.length,
+      },
       isSuccessful: livenessPassed,
     });
 
@@ -361,7 +393,7 @@ export const verifyFace = async (req, res) => {
         success: false,
         error:
           livenessResult.error ||
-          `Liveness check failed${typeof livenessScore === "number" ? ` (score ${livenessScore}%, minimum ${minLiveness}%)` : ""}. Please position your face clearly in the camera frame, ensure good lighting, and try again.`,
+          `Liveness check failed${typeof livenessScore === "number" ? ` (worst frame score ${livenessScore}%, minimum ${minLiveness}%)` : " (could not obtain a reliable liveness score from the verification provider)"}. Please position your face clearly in the camera frame, ensure good lighting, and try again.`,
       });
     }
 

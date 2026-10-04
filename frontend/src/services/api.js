@@ -82,6 +82,9 @@ export const company = {
   verifyCAC: (id) => api.post(`/company/${id}/verify/cac`),
   verifyTIN: (id) => api.post(`/company/${id}/verify/tin`),
   verifyWebsite: (id) => api.post(`/company/${id}/verify/website`),
+  getDnsInstructions: (id) =>
+    api.get(`/company/${id}/dns-verification-instructions`),
+  verifyDns: (id) => api.post(`/company/${id}/verify/dns`),
   sendCorporateEmailOTP: (id, data) =>
     api.post(`/company/${id}/corporate-email/send-otp`, data),
   verifyCorporateEmailOTP: (id, data) =>

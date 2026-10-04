@@ -561,3 +561,85 @@ export const verifyCorporateEmailOTP = async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 };
+
+/**
+ * Returns the DNS TXT record the recruiter needs to add at their domain
+ * host to cryptographically prove ownership of the claimed website. This
+ * is display-only — it doesn't perform the check itself (see verifyDns).
+ */
+export const getDnsVerificationInstructions = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const company = await Company.findById(id);
+    if (!company || company.recruiter_id !== req.user.id) {
+      return res.status(403).json({ success: false, error: "Forbidden" });
+    }
+    if (!company.website_url) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Add a company website first." });
+    }
+
+    const instructions = WhoisService.getDnsVerificationInstructions(
+      company.website_url,
+      company.id,
+    );
+    res.json({ success: true, data: instructions });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * Performs the actual DNS TXT lookup. This is the strongest ownership
+ * signal available to TrustHire — unlike WHOIS age, threat scoring, or
+ * homepage content matching (all heuristics), only someone who genuinely
+ * controls the domain's DNS zone can make this pass.
+ */
+export const verifyDns = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const company = await Company.findById(id);
+    if (!company || company.recruiter_id !== req.user.id) {
+      return res.status(403).json({ success: false, error: "Forbidden" });
+    }
+    if (!company.website_url) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Add a company website first." });
+    }
+
+    const result = await WhoisService.verifyDnsOwnership(
+      company.website_url,
+      company.id,
+    );
+
+    await VerificationCheck.create({
+      targetId: id,
+      targetType: "company",
+      checkType: "dns_ownership",
+      provider: "dns_txt",
+      referenceId: result.domain || company.website_url,
+      rawResponse: result,
+      isSuccessful: result.success ? result.verified : null,
+    });
+
+    if (!result.verified) {
+      return res.status(400).json({
+        success: false,
+        error:
+          result.error ||
+          "DNS TXT record not found or did not match. DNS changes can take up to 24-48 hours to propagate — please try again shortly after adding the record.",
+      });
+    }
+
+    res.json({
+      success: true,
+      message:
+        "Domain ownership cryptographically verified via DNS TXT record.",
+      data: result,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+};

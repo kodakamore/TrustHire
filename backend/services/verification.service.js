@@ -113,30 +113,40 @@ export const processJobVerification = async (jobAd, recruiter, company) => {
     });
   }
 
-  // Fetch detailed WhoisXML, APIVoid, CAC and website-content checks for this company
-  const [whoisCheck, apivoidCheck, cacCheck, contentCheck] = await Promise.all([
-    query(
-      "SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1",
-      [company.id, "whois"],
-    ),
-    query(
-      "SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1",
-      [company.id, "domain_reputation"],
-    ),
-    query(
-      "SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1",
-      [company.id, "cac"],
-    ),
-    query(
-      "SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1",
-      [company.id, "website_content"],
-    ),
-  ]);
+  // Fetch detailed WhoisXML, APIVoid, CAC, website-content and DNS
+  // ownership checks for this company
+  const [whoisCheck, apivoidCheck, cacCheck, contentCheck, dnsCheck] =
+    await Promise.all([
+      query(
+        "SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1",
+        [company.id, "whois"],
+      ),
+      query(
+        "SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1",
+        [company.id, "domain_reputation"],
+      ),
+      query(
+        "SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1",
+        [company.id, "cac"],
+      ),
+      query(
+        "SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1",
+        [company.id, "website_content"],
+      ),
+      query(
+        "SELECT * FROM verification_checks WHERE target_id = $1 AND check_type = $2 ORDER BY created_at DESC LIMIT 1",
+        [company.id, "dns_ownership"],
+      ),
+    ]);
 
   const whoisData = whoisCheck.rows[0]?.raw_response;
   const apivoidData = apivoidCheck.rows[0]?.raw_response;
   const cacData = cacCheck.rows[0]?.raw_response;
   const contentData = contentCheck.rows[0]?.raw_response;
+  // DNS TXT ownership is cryptographic proof, not a heuristic — if it's
+  // verified, it outweighs the softer content/text-matching signal below.
+  const dnsOwnershipVerified =
+    dnsCheck.rows[0]?.raw_response?.verified === true;
 
   // Evaluate WhoisXML Domain Age
   if (whoisData) {
@@ -194,7 +204,10 @@ export const processJobVerification = async (jobAd, recruiter, company) => {
   // Evaluate whether the website's own homepage actually references the
   // claimed company — a reachable, aged, low-risk domain still proves
   // nothing about ownership if the page never mentions the company at all.
-  if (contentData) {
+  // Skipped entirely when DNS ownership has already been cryptographically
+  // verified — that's strictly stronger proof than homepage text-matching,
+  // so there's nothing useful left for this heuristic to add.
+  if (contentData && !dnsOwnershipVerified) {
     if (contentData.success === false) {
       flags.push({
         type: "website_content_unreadable",
@@ -208,6 +221,15 @@ export const processJobVerification = async (jobAd, recruiter, company) => {
         reason: `The company name "${company.name}" could not be found anywhere on the claimed website's homepage. This website may not actually belong to this company.`,
       });
     }
+  }
+
+  if (dnsOwnershipVerified) {
+    flags.push({
+      type: "dns_ownership_verified",
+      severity: "info",
+      reason:
+        "Domain ownership was cryptographically confirmed via a DNS TXT record — the strongest available proof that this website belongs to the company.",
+    });
   }
 
   // =========================================================================
