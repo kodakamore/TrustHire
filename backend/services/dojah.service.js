@@ -33,13 +33,18 @@ const makeRequest = async (endpoint, options = {}) => {
     ...options.headers,
   };
 
-  // 12-second timeout to avoid indefinite hangs
+  // Timeout to avoid indefinite hangs. Default is fine for small, fast
+  // lookups (NIN/BVN/CAC — short query params, no file upload). Endpoints
+  // that upload an image for ML processing (liveness, face match) are
+  // genuinely slower, so those pass a longer override via options.timeoutMs.
+  const timeoutMs = options.timeoutMs || 12000;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
+    const { timeoutMs: _omit, ...fetchOptions } = options; // not a real fetch option
     const res = await fetch(url, {
-      ...options,
+      ...fetchOptions,
       headers,
       signal: controller.signal,
     });
@@ -202,7 +207,10 @@ export const lookupBVN = async (bvn) => {
   return makeRequest(`/api/v1/kyc/bvn/full?bvn=${bvn}`);
 };
 
-export const sendSMSOTP = async (phoneNumber, otp) => {
+// Sends a real OTP via Dojah. Dojah generates the code and delivers it; we
+// only get back a reference_id, which must be stored and later passed to
+// validateOTP together with the code the user types in.
+export const sendSMSOTP = async (phoneNumber) => {
   if (isMockMode()) {
     return {
       success: true,
@@ -221,19 +229,44 @@ export const sendSMSOTP = async (phoneNumber, otp) => {
     ? `234${digitsOnly.slice(1)}`
     : digitsOnly;
 
-  try {
-    const res = await makeRequest(`/api/v1/messaging/otp`, {
-      method: "POST",
-      body: JSON.stringify({
-        destination,
-        channel: "sms",
-        sender_id: "TrustHire",
-      }),
-    });
-    return res;
-  } catch (err) {
-    return { success: false, error: err.message };
+  const res = await makeRequest(`/api/v1/messaging/otp`, {
+    method: "POST",
+    body: JSON.stringify({
+      destination,
+      channel: "sms",
+      length: 6,
+      // Must be a Sender ID registered on your Dojah account.
+      // Use "Dojah" for development until your own is registered.
+      sender_id: process.env.DOJAH_SENDER_ID || "Dojah",
+    }),
+  });
+
+  // Dojah's docs show entity as an array; normalize to a single object.
+  const entity = Array.isArray(res.data?.entity)
+    ? res.data.entity[0]
+    : res.data?.entity;
+  if (res.success && !entity?.reference_id) {
+    return {
+      success: false,
+      error: "SMS provider did not return a reference for this code.",
+    };
   }
+  if (res.success) res.data.entity = entity;
+  return res;
+};
+
+// Asks Dojah whether the code the user entered is valid for the given
+// reference_id. In mock mode (and in Dojah's sandbox) the code is always 1234.
+export const validateOTP = async (code, referenceId) => {
+  if (isMockMode()) {
+    return {
+      success: true,
+      data: { entity: { valid: String(code).trim() === "1234" } },
+    };
+  }
+  return makeRequest(
+    `/api/v1/messaging/otp/validate?code=${encodeURIComponent(code)}&reference_id=${encodeURIComponent(referenceId)}`,
+  );
 };
 
 export const verifyLiveness = async (selfieBase64) => {
@@ -270,60 +303,56 @@ export const verifyLiveness = async (selfieBase64) => {
     };
   }
 
+  // Dojah expects raw base64 for image fields — NOT a data: URL.
+  const stripDataUrlPrefix = (b64) =>
+    (b64 || "").replace(/^data:image\/\w+;base64,/, "");
+
   const res = await makeRequest(`/api/v1/ml/liveness`, {
     method: "POST",
-    body: JSON.stringify({ image: selfieBase64 }),
+    body: JSON.stringify({ image: stripDataUrlPrefix(selfieBase64) }),
+    // Image upload + server-side ML inference is slower than a typical
+    // lookup — give it real headroom instead of the 12s default.
+    timeoutMs: 30000,
   });
-
-  // Always log the raw shape (once, truncated) so a real mismatch between
-  // what Dojah actually returns and the field-name guesses below is
-  // diagnosable from server logs rather than silently swallowed.
-  if (res.success) {
-    console.log(
-      "[Dojah Liveness] raw entity:",
-      JSON.stringify(res.data?.entity)?.slice(0, 800),
-    );
-  } else {
-    console.log("[Dojah Liveness] request failed:", res.error);
-  }
 
   if (res.success && res.data?.entity) {
     const entity = res.data.entity;
 
-    // Face-detected and "is actually live / not spoofed" are two DIFFERENT
-    // signals from Dojah and must not be conflated (the previous code set
-    // is_live = faceDetected, so any photo with a visible face — spoofed or
-    // not — was treated as "live"). Try several plausible locations Dojah's
-    // API may report an explicit anti-spoof verdict; if none of them are
-    // present, we leave is_live as `undefined` rather than defaulting it to
-    // true, which forces the caller to fall back to the numeric score gate.
-    const faceDetected =
-      entity.face?.detected ?? entity.face_detected ?? undefined;
-    const explicitIsLive =
-      entity.liveness?.is_live ??
-      entity.liveness?.live ??
-      entity.liveness?.status ??
-      entity.liveness_check ??
-      entity.is_live ??
-      undefined;
+    // Confirmed from this account's actual live response: entity.liveness is
+    // { spoof: boolean, confidence: number }. spoof=true means the image was
+    // classified AS a spoof (NOT live), so a high confidence there means
+    // "very confident this is fake". We normalize it into one
+    // "higher = more likely genuinely live" score.
+    // entity.liveness_check / entity.liveness_probability are kept as a
+    // fallback for accounts/API versions that use that shape instead.
+    const faceDetected = entity.face?.detected ?? undefined;
 
-    // Likewise, do NOT default the confidence score to a hardcoded high
-    // value when the expected field is missing — that fabricates a pass.
-    // If we genuinely cannot find a numeric score, leave it undefined so
-    // the threshold comparison in verify.controller.js fails closed.
-    const rawScore =
-      entity.liveness?.confidence ??
-      entity.liveness?.probability ??
-      entity.liveness?.score ??
-      entity.liveness_score ??
-      entity.confidence ??
-      undefined;
-    const livenessScore =
-      typeof rawScore === "number"
-        ? rawScore <= 1
-          ? rawScore * 100
-          : rawScore // normalize 0–1 probabilities to a 0–100 score
+    const hasSpoofField = typeof entity.liveness?.spoof === "boolean";
+    const spoofConfidence =
+      typeof entity.liveness?.confidence === "number"
+        ? entity.liveness.confidence
         : undefined;
+
+    const explicitIsLive = hasSpoofField
+      ? !entity.liveness.spoof
+      : (entity.liveness?.liveness_check ?? undefined);
+
+    let livenessScore;
+    if (hasSpoofField && typeof spoofConfidence === "number") {
+      // spoof=true, confidence=99.99 -> very confidently fake -> score ~0.01
+      // spoof=false, confidence=98   -> very confidently real -> score 98
+      livenessScore = entity.liveness.spoof
+        ? 100 - spoofConfidence
+        : spoofConfidence;
+    } else {
+      const rawScore = entity.liveness?.liveness_probability ?? undefined;
+      livenessScore =
+        typeof rawScore === "number"
+          ? rawScore <= 1
+            ? rawScore * 100
+            : rawScore // normalize 0–1 probabilities to a 0–100 scale
+          : undefined;
+    }
 
     res.data.entity.liveness_score = livenessScore;
     res.data.entity.is_live =
@@ -331,13 +360,24 @@ export const verifyLiveness = async (selfieBase64) => {
     res.data.entity.face_detected =
       typeof faceDetected === "boolean" ? faceDetected : undefined;
 
+    // Compact, targeted log of exactly the fields the decision is based on.
+    console.log(
+      "[Dojah Liveness] face_detected=%s is_live=%s liveness_score=%s (raw liveness node: %s)",
+      faceDetected,
+      explicitIsLive,
+      livenessScore,
+      JSON.stringify(entity.liveness),
+    );
+
     if (livenessScore === undefined && explicitIsLive === undefined) {
       console.warn(
-        "[Dojah Liveness] Could not find a recognizable score or liveness verdict field in the response above. " +
-          "The request will fail closed (rejected) rather than fabricate a pass. " +
-          "If this is unexpected, share the logged raw entity so the field-name mapping can be corrected.",
+        "[Dojah Liveness] entity.liveness was missing or had no recognizable fields. " +
+          "Failing closed (rejected) rather than fabricating a pass. Raw entity.liveness: " +
+          JSON.stringify(entity.liveness),
       );
     }
+  } else {
+    console.log("[Dojah Liveness] request failed:", res.error);
   }
 
   return res;
@@ -355,7 +395,6 @@ export const matchFace = async (selfieBase64, referencePhotoBase64) => {
   // (the recruiter's government-ID photo from their NIN/BVN lookup). If we
   // don't have one — or it happens to be byte-identical to the live selfie —
   // there is nothing to compare, so we must NOT fabricate a passing score.
-  // Callers are expected to treat this as "match unavailable", not "matched".
   if (!referencePhotoBase64 || referencePhotoBase64 === selfieBase64) {
     return {
       success: false,
@@ -378,13 +417,37 @@ export const matchFace = async (selfieBase64, referencePhotoBase64) => {
     };
   }
 
-  return makeRequest(`/api/v1/ml/photoid/match`, {
+  // Endpoint /api/v1/kyc/photoid/verify; body params are selfie_image /
+  // photoid_image, both base64 with the data: URL prefix stripped.
+  const stripDataUrlPrefix = (b64) =>
+    (b64 || "").replace(/^data:image\/\w+;base64,/, "");
+
+  const res = await makeRequest(`/api/v1/kyc/photoid/verify`, {
     method: "POST",
     body: JSON.stringify({
-      image1: selfieBase64,
-      image2: referencePhotoBase64,
+      selfie_image: stripDataUrlPrefix(selfieBase64),
+      photoid_image: stripDataUrlPrefix(referencePhotoBase64),
     }),
+    timeoutMs: 30000,
   });
+
+  // Dojah nests the real result under entity.selfie (confidence_value,
+  // match, blur/glare flags, extracted ID names). Normalize
+  // entity.confidence_value so the rest of the app doesn't need to know
+  // about this nesting.
+  if (res.success && res.data?.entity?.selfie) {
+    res.data.entity.confidence_value = res.data.entity.selfie.confidence_value;
+    res.data.entity.match = res.data.entity.selfie.match;
+    console.log(
+      "[Dojah Face Match] confidence=%s match=%s",
+      res.data.entity.selfie.confidence_value,
+      res.data.entity.selfie.match,
+    );
+  } else if (!res.success) {
+    console.log("[Dojah Face Match] request failed:", res.error);
+  }
+
+  return res;
 };
 
 export const lookupCAC = async (rcNumber) => {
@@ -411,8 +474,7 @@ export const lookupCAC = async (rcNumber) => {
           // and contact details. The mock includes these too so the
           // recruiter<->company cross-verification logic (director-name,
           // official-phone and official-email matching in
-          // company.controller.js) is exercisable end-to-end locally,
-          // instead of always silently seeing an empty array.
+          // company.controller.js) is exercisable end-to-end locally.
           affiliates: [
             { name: "SANDBOX DIRECTOR ONE", role: "Director" },
             { name: "SANDBOX DIRECTOR TWO", role: "Secretary" },

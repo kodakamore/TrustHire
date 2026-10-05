@@ -24,12 +24,10 @@ export const verifyEmail = async (req, res) => {
     });
 
     if (!result.success) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: result.error || "Email verification failed",
-        });
+      return res.status(400).json({
+        success: false,
+        error: result.error || "Email verification failed",
+      });
     }
 
     await Recruiter.update(recruiter.id, { is_email_verified: true });
@@ -38,6 +36,14 @@ export const verifyEmail = async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 };
+
+// ---------------------------------------------------------------------------
+// PHONE OTP (real verification)
+// Dojah generates and sends the code. We only store the reference_id Dojah
+// returns, and later ask Dojah whether the code the user typed is valid.
+// ---------------------------------------------------------------------------
+
+const MAX_OTP_ATTEMPTS = 5;
 
 export const sendPhoneOTP = async (req, res) => {
   try {
@@ -50,59 +56,53 @@ export const sendPhoneOTP = async (req, res) => {
         .json({ success: false, error: "Phone number is required." });
     }
 
-    const digitsOnly = phoneNumber.replace(/\D/g, "");
-    if (digitsOnly.length < 10) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: "Please enter a valid phone number (at least 10 digits).",
-        });
+    if (phoneNumber.replace(/\D/g, "").length < 10) {
+      return res.status(400).json({
+        success: false,
+        error: "Please enter a valid phone number (at least 10 digits).",
+      });
     }
 
-    // 1. Cross-reference with Dojah phone carrier & validity screening
-    let dojahResult = { success: true };
+    // Optional carrier/validity screening (does not block sending)
     try {
-      dojahResult = await DojahService.verifyPhone(phoneNumber);
+      const screening = await DojahService.verifyPhone(phoneNumber);
       await VerificationCheck.create({
         targetId: req.user.id,
         targetType: "recruiter",
         checkType: "phone_screening",
         provider: "dojah",
-        referenceId: dojahResult.data?.entity?.reference_id || "N/A",
-        rawResponse: dojahResult,
-        isSuccessful: dojahResult.success !== false,
+        referenceId: screening.data?.entity?.reference_id || "N/A",
+        rawResponse: screening,
+        isSuccessful: screening.success !== false,
       });
     } catch (e) {
       console.warn("Dojah phone screening warning:", e.message);
     }
 
-    // 2. Generate 6-digit OTP and 10-minute expiry
-    const phoneOtp = Math.floor(100000 + Math.random() * 900000).toString();
-    const phoneOtpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    // Dojah generates and delivers the code; we only keep its reference.
+    const smsResult = await DojahService.sendSMSOTP(phoneNumber);
+    if (!smsResult.success) {
+      return res.status(502).json({
+        success: false,
+        error:
+          "We couldn't send a verification code right now. Please try again shortly.",
+      });
+    }
 
     await Recruiter.update(req.user.id, {
       phone_number: phoneNumber,
-      phone_otp: phoneOtp,
-      phone_otp_expires_at: phoneOtpExpiresAt,
+      phone_otp_reference_id: smsResult.data.entity.reference_id,
+      phone_otp_expires_at: new Date(Date.now() + 10 * 60 * 1000),
+      phone_otp_attempts: 0,
     });
-
-    // 3. Attempt sending OTP via Dojah SMS service
-    let smsResult = { success: true };
-    try {
-      smsResult = await DojahService.sendSMSOTP(phoneNumber, phoneOtp);
-      console.log(`[TrustHire Phone OTP] Sent to ${phoneNumber}: ${phoneOtp}`);
-    } catch (e) {
-      console.warn("Dojah SMS send warning:", e.message);
-    }
 
     res.json({
       success: true,
-      message: `Verification code sent to ${phoneNumber}. Please enter the 6-digit code.`,
+      message: `Verification code sent to ${phoneNumber}. Please enter the code.`,
       data: {
         phoneNumber,
-        dojahScreening: dojahResult.data?.entity || null,
-        debugOtp: process.env.NODE_ENV !== "production" ? phoneOtp : undefined,
+        // Only shown in explicit mock mode (never keyed off NODE_ENV)
+        debugOtp: process.env.USE_MOCK_API === "true" ? "1234" : undefined,
       },
     });
   } catch (error) {
@@ -114,12 +114,10 @@ export const verifyPhoneOTP = async (req, res) => {
   try {
     const { otp } = req.body;
     if (!otp) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: "6-digit verification code is required.",
-        });
+      return res.status(400).json({
+        success: false,
+        error: "Verification code is required.",
+      });
     }
 
     const recruiter = await Recruiter.findById(req.user.id);
@@ -136,44 +134,70 @@ export const verifyPhoneOTP = async (req, res) => {
       });
     }
 
-    if (
-      !recruiter.phone_otp ||
-      recruiter.phone_otp.trim() !== otp.toString().trim()
-    ) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: "Invalid verification code. Please check and try again.",
-        });
+    if (!recruiter.phone_otp_reference_id) {
+      return res.status(400).json({
+        success: false,
+        error: "No code was requested. Please request a new code.",
+      });
     }
 
     if (
       recruiter.phone_otp_expires_at &&
       new Date(recruiter.phone_otp_expires_at) < new Date()
     ) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: "Verification code has expired. Please request a new code.",
-        });
+      return res.status(400).json({
+        success: false,
+        error: "Verification code has expired. Please request a new code.",
+      });
     }
 
-    await Recruiter.update(req.user.id, {
-      is_phone_verified: true,
-      phone_otp: null,
-      phone_otp_expires_at: null,
-    });
+    if ((recruiter.phone_otp_attempts || 0) >= MAX_OTP_ATTEMPTS) {
+      return res.status(429).json({
+        success: false,
+        error: "Too many incorrect attempts. Please request a new code.",
+      });
+    }
+
+    const result = await DojahService.validateOTP(
+      otp.toString().trim(),
+      recruiter.phone_otp_reference_id,
+    );
+
+    // Network/server trouble is not the user's fault: don't count an attempt.
+    if (!result.success && (!result.status || result.status >= 500)) {
+      return res.status(502).json({
+        success: false,
+        error: "Couldn't verify the code right now. Please try again.",
+      });
+    }
+
+    const valid = result.success && result.data?.entity?.valid === true;
 
     await VerificationCheck.create({
       targetId: req.user.id,
       targetType: "recruiter",
       checkType: "phone_otp",
       provider: "dojah",
-      referenceId: `phone_otp_verified_${Date.now()}`,
-      rawResponse: { verified: true },
-      isSuccessful: true,
+      referenceId: recruiter.phone_otp_reference_id,
+      rawResponse: { valid, status: result.status ?? null }, // never store the code itself
+      isSuccessful: valid,
+    });
+
+    if (!valid) {
+      await Recruiter.update(req.user.id, {
+        phone_otp_attempts: (recruiter.phone_otp_attempts || 0) + 1,
+      });
+      return res.status(400).json({
+        success: false,
+        error: "Invalid verification code. Please check and try again.",
+      });
+    }
+
+    await Recruiter.update(req.user.id, {
+      is_phone_verified: true,
+      phone_otp_reference_id: null,
+      phone_otp_expires_at: null,
+      phone_otp_attempts: 0,
     });
 
     res.json({
@@ -185,6 +209,8 @@ export const verifyPhoneOTP = async (req, res) => {
   }
 };
 
+// NOTE: this route marks the phone as verified from a carrier lookup alone,
+// with no OTP. Make sure it is NOT exposed in your routes file, or remove it.
 export const verifyPhone = async (req, res) => {
   try {
     const recruiter = await Recruiter.findById(req.user.id);
@@ -209,12 +235,10 @@ export const verifyPhone = async (req, res) => {
     });
 
     if (!result.success) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: result.error || "Phone verification failed",
-        });
+      return res.status(400).json({
+        success: false,
+        error: result.error || "Phone verification failed",
+      });
     }
 
     await Recruiter.update(req.user.id, {
@@ -234,12 +258,10 @@ export const verifyIdentity = async (req, res) => {
     if (type === "nin") result = await DojahService.lookupNIN(number);
     else if (type === "bvn") result = await DojahService.lookupBVN(number);
     else
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: "Invalid identity type. Must be NIN or BVN.",
-        });
+      return res.status(400).json({
+        success: false,
+        error: "Invalid identity type. Must be NIN or BVN.",
+      });
 
     await VerificationCheck.create({
       targetId: req.user.id,
@@ -252,12 +274,10 @@ export const verifyIdentity = async (req, res) => {
     });
 
     if (!result.success) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: result.error || "Identity verification failed",
-        });
+      return res.status(400).json({
+        success: false,
+        error: result.error || "Identity verification failed",
+      });
     }
 
     const updateData = { is_identity_verified: true };
@@ -304,17 +324,14 @@ export const verifyFace = async (req, res) => {
         (f) => typeof f !== "string" || !f.startsWith("data:image/"),
       )
     ) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: "One or more captured frames were invalid.",
-        });
+      return res.status(400).json({
+        success: false,
+        error: "One or more captured frames were invalid.",
+      });
     }
 
     // Anti-replay: if we received multiple frames, they must not all be the
-    // exact same image — that indicates a static photo held up to the
-    // camera rather than a live capture across the challenge sequence.
+    // exact same image.
     if (frameList.length > 1 && framesLookIdentical(frameList)) {
       return res.status(400).json({
         success: false,
@@ -327,17 +344,34 @@ export const verifyFace = async (req, res) => {
     // primary image for face-matching against the ID photo.
     const selfie = frameList[frameList.length - 1];
 
-    // 1. Run Dojah Liveness & Anti-spoof check on EVERY captured frame, not
-    // just the last one. A spoof attempt (e.g. a printed photo, or a phone
-    // playing a video) might get lucky and pass the check on one frame
-    // (motion blur, glare, angle) but is much less likely to pass on all
-    // three independently-captured frames across ~3 seconds. We require
-    // every frame to individually clear the bar, and use the WORST
-    // (minimum) score across frames as the representative liveness score.
+    // 1. Liveness / anti-spoof check on every captured frame. Every frame
+    // must individually clear the bar.
     const minLiveness = parseFloat(process.env.MIN_LIVENESS_SCORE || 80.0);
-    const livenessResults = await Promise.all(
-      frameList.map((f) => DojahService.verifyLiveness(f)),
-    );
+
+    const framePassed = (r) => {
+      const e = r.data?.entity;
+      return (
+        r.success !== false &&
+        e?.face_detected !== false &&
+        e?.is_live !== false &&
+        typeof e?.liveness_score === "number" &&
+        e.liveness_score >= minLiveness
+      );
+    };
+
+    // Sequential (uploads are slow), and stop at the first failing frame:
+    // each call is billed and can take up to 30s, so there's no point
+    // checking the remaining frames once the capture has already failed.
+    const livenessResults = [];
+    let failedResult = null;
+    for (const frame of frameList) {
+      const r = await DojahService.verifyLiveness(frame);
+      livenessResults.push(r);
+      if (!framePassed(r)) {
+        failedResult = r;
+        break;
+      }
+    }
 
     const perFrame = livenessResults.map((r) => ({
       score: r.data?.entity?.liveness_score,
@@ -349,28 +383,18 @@ export const verifyFace = async (req, res) => {
     const numericScores = perFrame
       .map((f) => f.score)
       .filter((s) => typeof s === "number");
-    // Worst-case score across all frames — a single weak frame should drag
-    // the whole capture down, not be averaged away by two good ones.
-    const livenessScore =
-      numericScores.length === frameList.length
-        ? Math.min(...numericScores)
-        : undefined; // any frame missing a real score fails the whole batch closed
+    // Worst-case score among the frames that were checked
+    const livenessScore = numericScores.length
+      ? Math.min(...numericScores)
+      : undefined;
 
-    const allFramesPassed = perFrame.every(
-      (f) =>
-        f.apiSuccess &&
-        f.faceDetected !== false &&
-        f.isLive !== false &&
-        typeof f.score === "number" &&
-        f.score >= minLiveness,
-    );
-
+    // Passed only if no frame failed AND every submitted frame was checked
     const livenessPassed =
-      allFramesPassed &&
-      typeof livenessScore === "number" &&
-      livenessScore >= minLiveness;
-    // Kept for the response payload below (primary/last-frame result).
-    const livenessResult = livenessResults[livenessResults.length - 1];
+      !failedResult && livenessResults.length === frameList.length;
+
+    // The failing frame if there was one, otherwise the final frame
+    const livenessResult =
+      failedResult || livenessResults[livenessResults.length - 1];
 
     await VerificationCheck.create({
       targetId: req.user.id,
@@ -383,25 +407,28 @@ export const verifyFace = async (req, res) => {
         liveness: livenessResults,
         perFrame,
         worstScore: livenessScore,
-        frameCount: frameList.length,
+        framesSubmitted: frameList.length,
+        framesChecked: livenessResults.length,
       },
       isSuccessful: livenessPassed,
     });
 
     if (!livenessPassed) {
+      const scoreText =
+        typeof livenessScore === "number"
+          ? ` (lowest frame score ${livenessScore.toFixed(1)}%, minimum ${minLiveness}%)`
+          : " (could not obtain a reliable liveness score from the verification provider)";
       return res.status(400).json({
         success: false,
         error:
-          livenessResult.error ||
-          `Liveness check failed${typeof livenessScore === "number" ? ` (worst frame score ${livenessScore}%, minimum ${minLiveness}%)` : " (could not obtain a reliable liveness score from the verification provider)"}. Please position your face clearly in the camera frame, ensure good lighting, and try again.`,
+          failedResult?.error ||
+          `Liveness check failed${scoreText}. Please position your face clearly in the camera frame, ensure good lighting, and try again.`,
       });
     }
 
     // 2. Face Match — resolved SERVER-SIDE against the recruiter's own
     // government-ID photo captured earlier during NIN/BVN lookup. We
-    // deliberately IGNORE any reference photo the client might try to send;
-    // trusting a client-supplied "reference" would let the frontend pick
-    // whatever image it wants to "match" against, defeating the point.
+    // deliberately IGNORE any reference photo the client might send.
     const idCheckRes = await query(
       `SELECT raw_response FROM verification_checks
        WHERE target_id = $1 AND target_type = 'recruiter' AND check_type IN ('nin', 'bvn') AND is_successful = true
@@ -414,12 +441,16 @@ export const verifyFace = async (req, res) => {
     const matchResult = await DojahService.matchFace(selfie, idPhoto);
     const minMatchScore = parseFloat(process.env.MIN_FACE_MATCH_SCORE || 85.0);
     const confidence = matchResult.data?.entity?.confidence_value;
+    const dojahMatchVerdict = matchResult.data?.entity?.match; // Dojah's own boolean
     const matchAttempted = !matchResult.noReference;
+    // Prefer Dojah's own match verdict when present; fall back to our own
+    // threshold comparison only if that boolean is missing.
     const matchPassed =
       matchAttempted &&
       matchResult.success !== false &&
-      typeof confidence === "number" &&
-      confidence >= minMatchScore;
+      (typeof dojahMatchVerdict === "boolean"
+        ? dojahMatchVerdict
+        : typeof confidence === "number" && confidence >= minMatchScore);
 
     await VerificationCheck.create({
       targetId: req.user.id,
@@ -435,12 +466,9 @@ export const verifyFace = async (req, res) => {
       isSuccessful: matchAttempted ? matchPassed : null,
     });
 
-    // A face-match failure (real mismatch against the ID photo) blocks
-    // verification outright. A face match that could not be *attempted*
-    // (no ID photo on file yet) does not block — liveness alone is enough
-    // to mark this step done — but it is recorded truthfully as unmatched
-    // rather than a fabricated pass, and downstream job-verification logic
-    // (see verification.service.js) flags it for manual review.
+    // A real mismatch against the ID photo blocks verification. A match that
+    // could not be attempted (no ID photo on file) does not block, but is
+    // recorded truthfully rather than as a fabricated pass.
     if (matchAttempted && !matchPassed) {
       return res.status(400).json({
         success: false,
@@ -475,10 +503,7 @@ export const verifyFace = async (req, res) => {
 };
 
 // Turns the raw boolean columns + the most recent verification_checks rows
-// into an explicit Pending / Verified / Failed status per step, per
-// requirement: each verification needs a clear backend-owned status rather
-// than the frontend inferring it. This is additive — the existing boolean
-// fields on `recruiter` are left untouched for backward compatibility.
+// into an explicit Pending / Verified / Failed status per step.
 const deriveCheckStatus = (isVerifiedFlag, checks, checkType) => {
   if (isVerifiedFlag) return "verified";
   const latest = checks.find((c) => c.check_type === checkType);
