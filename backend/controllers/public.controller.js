@@ -2,6 +2,29 @@ import * as VerificationCode from '../models/verificationCode.model.js';
 import * as Report from '../models/report.model.js';
 import { query } from '../config/database.js';
 import { logEvent } from '../services/audit.service.js';
+import { hashJobData } from '../services/hash.service.js';
+
+/** Recompute the approved snapshot hash and compare. Two serializations
+ *  cover historic rows (undefined fields were dropped when the hash was
+ *  originally computed, nulls when read back from the DB). */
+const checkIntegrity = (record) => {
+  if (!record.data_hash) return 'unknown';
+  const base = {
+    title: record.title,
+    description: record.description,
+    company_id: record.company_id,
+    location: record.location,
+    employment_type: record.employment_type,
+    salary_range: record.salary_range,
+  };
+  const withNulls = hashJobData(base);
+  const omitNulls = hashJobData(
+    Object.fromEntries(Object.entries(base).filter(([, v]) => v !== null && v !== undefined)),
+  );
+  return withNulls === record.data_hash || omitNulls === record.data_hash
+    ? 'verified'
+    : 'mismatch';
+};
 
 export const verifyByPin = async (req, res) => {
   try {
@@ -31,15 +54,29 @@ export const verifyByPin = async (req, res) => {
       VALUES ($1, $2, $3)
     `, [record.id, req.ip, req.get('User-Agent')]);
 
-    // Determine verification status
+    // Determine verification status. `status` is the code lifecycle
+    // (active | deactivated | revoked | compromised); expiry stays
+    // time-based off expires_at.
     const now = new Date();
     const expiresAt = new Date(record.expires_at);
+    const codeStatus = record.status || (record.is_active ? 'active' : 'deactivated');
     let status;
     let title;
     let message;
 
-    if (!record.is_active) {
-      // Check if it was revoked (job status would be set by admin)
+    if (codeStatus === 'compromised') {
+      // CLONED CREDENTIAL: a third party copied this QR/PIN onto another
+      // advert. The recruiter's verification is INTACT — never imply fault.
+      status = 'compromised';
+      title = 'Verification Code Reported Misused';
+      message = 'This verification code was reported being displayed on ANOTHER advert and has been replaced. The details below are the authentic, verified advert — this recruiter\'s verification is intact. Compare them carefully with the advert you are looking at: if it differs in any way, that advert is FAKE.';
+    } else if (codeStatus === 'revoked') {
+      status = 'revoked';
+      title = 'Verification Revoked';
+      message = 'This job advertisement\'s verification has been REVOKED by our platform administrators. We strongly recommend NOT proceeding with this job application.';
+    } else if (codeStatus !== 'active') {
+      // Deactivated (or legacy is_active = FALSE): revoked-ness is derived
+      // from the job status so historic revocations still read correctly.
       const jobResult = await query('SELECT status FROM job_advertisements WHERE id = $1', [record.job_ad_id]);
       const jobStatus = jobResult.rows[0]?.status;
 
@@ -62,6 +99,17 @@ export const verifyByPin = async (req, res) => {
       message = 'This job advertisement has been verified on TrustHire. Compare the details below with the advertisement you received.';
     }
 
+    // Snapshot integrity: does the stored advert still match the hash of
+    // what was approved? Detects any post-approval content drift (finding
+    // category "content_drift"), including internal tampering.
+    const integrity = checkIntegrity(record);
+    if (integrity === 'mismatch') {
+      await logEvent(
+        'ADVERT_HASH_MISMATCH', null, 'public', record.job_ad_id, 'job_advertisement',
+        { pin: record.pin, codeStatus }, req.ip, req.get('User-Agent'),
+      );
+    }
+
     await logEvent(
       'VERIFICATION_LOOKUP', null, 'public', record.id, 'verification_code',
       { method: 'PIN', pin, result: status },
@@ -73,6 +121,7 @@ export const verifyByPin = async (req, res) => {
       status,
       title,
       message,
+      integrity, // 'verified' | 'mismatch' | 'unknown' — snapshot hash check
       verifiedOn: record.created_at,
       expiresOn: record.expires_at,
       job: {
@@ -107,34 +156,88 @@ export const verifyByQR = async (req, res) => {
   return verifyByPin(req, res);
 };
 
+// Legacy free-text reasons (older clients) mapped onto the intake taxonomy.
+const CATEGORY_ALIASES = {
+  'misleading information': 'detail_mismatch',
+  'misleading info': 'detail_mismatch',
+  'does not match': 'detail_mismatch',
+  'job does not exist': 'job_not_real',
+  'asks for money': 'fee_requested',
+  'fee requested': 'fee_requested',
+  'request for payment': 'fee_requested',
+  'fake job': 'impersonation',
+  'expired or revoked': 'expired_or_revoked',
+  'scam': 'job_not_real',
+};
+
+const normalizeCategory = (raw) => {
+  const v = String(raw || '').toLowerCase().trim();
+  if (Report.CATEGORIES.has(v)) return v;
+  return CATEGORY_ALIASES[v] || 'other';
+};
+
+/** Keep only known string fields from "what the seeker saw", truncated. */
+const sanitizeObserved = (raw) => {
+  if (!raw || typeof raw !== 'object') return null;
+  const allowed = ['title', 'company', 'salary', 'location', 'url', 'notes'];
+  const out = {};
+  for (const key of allowed) {
+    const val = raw[key];
+    if (typeof val === 'string' && val.trim()) {
+      out[key] = val.trim().slice(0, 1000);
+    }
+  }
+  return Object.keys(out).length ? out : null;
+};
+
 export const submitReport = async (req, res) => {
   try {
-    const { jobAdId, reporterEmail, reportReason, description } = req.body;
+    const { jobAdId, reporterEmail, reporterPhone, reportReason, category, description, observedContent } = req.body;
 
-    if (!jobAdId || !reportReason) {
+    if (!jobAdId || !(reportReason || category)) {
       return res.status(400).json({ success: false, error: 'Job advertisement ID or PIN and reason are required.' });
     }
 
     let resolvedJobAdId = jobAdId;
+    let verificationCodeId = null;
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobAdId);
     if (!isUuid) {
+      // The seeker submits the PIN they scanned — resolve to advert + code.
       const codeRecord = await VerificationCode.findByPin(jobAdId);
       if (codeRecord) {
         resolvedJobAdId = codeRecord.job_ad_id;
+        verificationCodeId = codeRecord.id;
       } else {
         return res.status(400).json({ success: false, error: 'Could not find a valid job advertisement for the provided PIN or ID.' });
       }
+    } else {
+      const activeCode = await VerificationCode.findByJobAdId(jobAdId);
+      verificationCodeId = activeCode ? activeCode.id : null;
     }
+
+    const normCategory = normalizeCategory(category || reportReason);
+    const severity = Report.severityForCategory(normCategory);
+    // High-severity intake categories auto-escalate straight to Admin review
+    // (fee-seeking, fake jobs, impersonation).
+    const autoEscalated = severity === 'high';
 
     const report = await Report.create({
       jobAdId: resolvedJobAdId,
       reporterEmail: reporterEmail || null,
-      reportReason: `${reportReason}${description ? ': ' + description : ''}`
+      reporterPhone: reporterPhone || null,
+      reportReason: String(reportReason || normCategory).slice(0, 300),
+      description: description ? String(description).slice(0, 4000) : null,
+      category: normCategory,
+      severity,
+      observedContent: sanitizeObserved(observedContent),
+      verificationCodeId,
+      status: autoEscalated ? 'escalated' : 'open',
+      escalatedAt: autoEscalated ? new Date() : null,
     });
 
     await logEvent(
       'REPORT_SUBMITTED', null, 'public', report.id, 'report',
-      { jobAdId, reason: reportReason },
+      { jobAdId: resolvedJobAdId, category: normCategory, severity, autoEscalated },
       req.ip, req.get('User-Agent')
     );
 
@@ -142,6 +245,8 @@ export const submitReport = async (req, res) => {
       success: true,
       data: {
         id: report.id,
+        status: report.status,
+        severity: report.severity,
         message: 'Thank you for your report. Our team will review it promptly.'
       }
     });

@@ -2,6 +2,55 @@ import * as Recruiter from "../models/recruiter.model.js";
 import * as VerificationCheck from "../models/verificationCheck.model.js";
 import * as DojahService from "../services/dojah.service.js";
 import { query } from "../config/database.js";
+import { putImage, resolvePhotoRef } from "../services/storage.service.js";
+import { redactIdentifiers } from "../utils/piiRedactor.js";
+
+// ---------------------------------------------------------------------------
+// Photo externalization: provider responses (NIN/BVN lookups) embed base64 ID
+// photos. We move the bytes into encrypted object storage and leave a
+// `photo://<uuid>` pointer in raw_response, so the DB never holds image data.
+// Returns { clean, extracted } where `clean` is safe to persist.
+// ---------------------------------------------------------------------------
+const externalizePhotos = async (payload, { ownerId, purpose = "id_photo" }) => {
+  const entity = payload?.data?.entity;
+  if (!entity) return { clean: payload, extracted: 0 };
+
+  let extracted = 0;
+  for (const field of ["photo", "image"]) {
+    const value = entity[field];
+    if (typeof value !== "string" || value.length < 256) continue; // skip refs/short
+    const looksLikeImage =
+      value.startsWith("data:image/") || /^[A-Za-z0-9+/=\s]{256,}$/.test(value);
+    if (!looksLikeImage) continue;
+    try {
+      const media = await putImage({
+        payload: value,
+        ownerType: "recruiter",
+        ownerId,
+        purpose,
+      });
+      entity[field] = `photo://${media.id}`;
+      extracted += 1;
+    } catch (err) {
+      // A rejected photo (bad bytes / oversize) must not break verification,
+      // but the plaintext must NOT be persisted either — drop it.
+      console.error(`Photo extraction failed (${field}): ${err.message}`);
+      delete entity[field];
+      extracted += 1;
+    }
+  }
+  return { clean: payload, extracted };
+};
+
+// Resolve either a legacy base64 blob or a `photo://` pointer to a data URL
+// suitable for sending to the face-match provider.
+const resolveIdPhoto = async (value) => {
+  if (typeof value !== "string" || !value) return null;
+  if (value.startsWith("photo://")) return resolvePhotoRef(value);
+  if (value.startsWith("data:image/")) return value;
+  return null;
+};
+
 
 export const verifyEmail = async (req, res) => {
   try {
@@ -263,13 +312,20 @@ export const verifyIdentity = async (req, res) => {
         error: "Invalid identity type. Must be NIN or BVN.",
       });
 
+    // Move any embedded ID photo into encrypted storage BEFORE the provider
+    // response is written to verification_checks.
+    const { clean } = await externalizePhotos(result, {
+      ownerId: req.user.id,
+      purpose: "id_photo",
+    });
+
     await VerificationCheck.create({
       targetId: req.user.id,
       targetType: "recruiter",
       checkType: type,
       provider: "dojah",
-      referenceId: result.data?.entity?.reference_id || "N/A",
-      rawResponse: result,
+      referenceId: clean.data?.entity?.reference_id || "N/A",
+      rawResponse: clean,
       isSuccessful: result.success,
     });
 
@@ -285,7 +341,11 @@ export const verifyIdentity = async (req, res) => {
     if (type === "bvn") updateData.bvn = number;
     await Recruiter.update(req.user.id, updateData);
 
-    res.json({ success: true, data: result.data });
+    // Mask identifiers in the response: the raw provider payload echoes the
+    // full NIN/BVN, and nothing downstream reads it (VerifyIdentity.jsx
+    // ignores this body). Images were already externalized above; the
+    // sanitizeResponses middleware scrubs any that survive.
+    res.json({ success: true, data: redactIdentifiers(result.data) });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -443,7 +503,9 @@ export const verifyFace = async (req, res) => {
     // under a different key. Check both, in all-caps/field-naming-agnostic
     // order: photo first (more common), then image as a fallback.
     const idEntity = idCheckRes.rows[0]?.raw_response?.data?.entity;
-    const idPhoto = idEntity?.photo || idEntity?.image || null;
+    // May be a legacy base64 blob (pre-migration rows) or a photo:// pointer
+    // to encrypted storage (post-migration) — resolveIdPhoto handles both.
+    const idPhoto = await resolveIdPhoto(idEntity?.photo || idEntity?.image || null);
 
     const matchResult = await DojahService.matchFace(selfie, idPhoto);
     const minMatchScore = parseFloat(process.env.MIN_FACE_MATCH_SCORE || 85.0);
@@ -531,7 +593,9 @@ export const getVerificationStatus = async (req, res) => {
     res.json({
       success: true,
       data: {
-        ...recruiter,
+        // Strip NIN/BVN + OTP secrets: the model decrypts these for internal
+        // checks only, and this payload goes straight to the client.
+        ...Recruiter.toPublicRecruiter(recruiter),
         checks: {
           email: deriveCheckStatus(
             recruiter.is_email_verified,

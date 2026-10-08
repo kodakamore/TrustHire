@@ -196,3 +196,95 @@ export const sendRegistrationVerificationLink = async ({ to, verificationLink, o
 
   return { success: true, provider: 'local_fallback', link: verificationLink, otp };
 };
+
+/**
+ * Sent when a verification code was CLONED by a third party and reissued.
+ * The recruiter is the victim here — wording must protect, not accuse.
+ */
+export const sendVerificationCompromisedEmail = async ({ to, recruiterName, jobTitle, newPin, qrCodeUrl }) => {
+  const resend = getResendClient();
+
+  const htmlContent = `
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; margin: 0; padding: 30px; }
+          .container { max-width: 560px; margin: 0 auto; background: #ffffff; border-radius: 16px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); }
+          .header { background: #0f172a; padding: 28px; text-align: center; }
+          .logo { font-size: 22px; font-weight: 900; color: #ffffff; letter-spacing: 1px; }
+          .badge { display: inline-block; background: #b45309; color: #ffffff; font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 9999px; margin-top: 8px; text-transform: uppercase; }
+          .content { padding: 32px 28px; }
+          .title { font-size: 20px; font-weight: 700; color: #1e293b; margin-top: 0; margin-bottom: 12px; }
+          .text { font-size: 14px; line-height: 1.6; color: #475569; margin-bottom: 20px; }
+          .otp-box { background: #f8fafc; border: 2px dashed #cbd5e1; border-radius: 12px; padding: 18px; text-align: center; margin: 20px 0; }
+          .otp-code { font-family: monospace; font-size: 30px; font-weight: 800; letter-spacing: 6px; color: #4338ca; }
+          .btn-box { text-align: center; margin: 24px 0; }
+          .btn { display: inline-block; background: #4f46e5; color: #ffffff !important; font-size: 14px; font-weight: 700; text-decoration: none; padding: 14px 32px; border-radius: 10px; }
+          .footer { padding: 20px 28px; background: #f8fafc; border-top: 1px solid #e2e8f0; font-size: 12px; color: #94a3b8; text-align: center; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <div class="logo">TRUSTHIRE</div>
+            <div class="badge">Security Notice — Code Reissued</div>
+          </div>
+          <div class="content">
+            <h2 class="title">Your verification code was protected, ${recruiterName || 'Recruiter'}.</h2>
+            <p class="text">
+              We detected that the verification QR code / PIN for
+              <strong>${jobTitle || 'your job advert'}</strong> was being displayed on a
+              different, unauthorized advert. <strong>You did nothing wrong</strong> —
+              your advert's verification remains fully intact. As a precaution, we have
+              replaced the old code (now disabled) with a fresh one below.
+            </p>
+
+            <div class="otp-box">
+              <div style="font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: #64748b; margin-bottom: 6px;">Your New Verification PIN</div>
+              <div class="otp-code">${newPin || ''}</div>
+            </div>
+
+            <div class="btn-box">
+              <a href="${qrCodeUrl || '#'}" class="btn" target="_blank" style="color: #ffffff;">View New QR Code</a>
+            </div>
+            <p class="text" style="font-size: 13px; color: #64748b;">
+              Please replace the old QR code everywhere it was displayed (posters,
+              listings, social media) with the new one. The old code will only show
+              a "reported misused" warning from now on.
+            </p>
+          </div>
+          <div class="footer">
+            TrustHire Platform &middot; Authentic, Verified Hiring in Nigeria
+          </div>
+        </div>
+      </body>
+    </html>
+  `;
+
+  if (resend) {
+    try {
+      const response = await resend.emails.send({
+        from: FROM_EMAIL,
+        to: [to],
+        subject: `[TrustHire] Security notice: new verification code for ${jobTitle || 'your advert'}`,
+        html: htmlContent,
+      });
+      return { success: true, provider: 'resend', data: response };
+    } catch (err) {
+      console.error('Resend delivery error:', err);
+    }
+  }
+
+  console.log(`\n======================================================`);
+  console.log(`[TrustHire Mailer (Local/Dev)]`);
+  console.log(`To: ${to}`);
+  console.log(`Subject: Security notice: new verification code`);
+  console.log(`Job: ${jobTitle}`);
+  console.log(`New PIN: ${newPin}`);
+  console.log(`QR URL: ${qrCodeUrl}`);
+  console.log(`======================================================\n`);
+
+  return { success: true, provider: 'local_fallback', newPin, qrCodeUrl };
+};

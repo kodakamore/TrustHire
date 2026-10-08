@@ -156,7 +156,7 @@ export const verifyEmailToken = async (req, res) => {
         "Email verified successfully! Your recruiter account is now activated.",
       data: {
         token: authToken,
-        recruiter: { ...recruiter, is_email_verified: true },
+        recruiter: { ...Recruiter.toPublicRecruiter(recruiter), is_email_verified: true },
       },
     });
   } catch (err) {
@@ -248,7 +248,7 @@ export const verifyEmailOtp = async (req, res) => {
         "Email verified successfully! You can now proceed with your onboarding.",
       data: {
         token: authToken,
-        recruiter: { ...recruiter, is_email_verified: true },
+        recruiter: { ...Recruiter.toPublicRecruiter(recruiter), is_email_verified: true },
       },
     });
   } catch (err) {
@@ -339,6 +339,18 @@ export const login = async (req, res) => {
         .json({ success: false, error: "Invalid email or password" });
     }
 
+    // Account-level sanctions (Super Admin) block login outright.
+    if (recruiter.account_status && recruiter.account_status !== "active") {
+      return res.status(403).json({
+        success: false,
+        error:
+          recruiter.account_status === "removed"
+            ? "This TrustHire account has been permanently removed."
+            : "Your TrustHire account has been suspended. Please contact support@trusthire.ng if you believe this is a mistake.",
+        accountStatus: recruiter.account_status,
+      });
+    }
+
     // Backend-enforced gate: a recruiter must have completed email
     // verification before they can obtain a session token at all. This
     // cannot be bypassed from the frontend — the check lives here, not in
@@ -359,7 +371,7 @@ export const login = async (req, res) => {
     );
 
     delete recruiter.password_hash;
-    res.json({ success: true, data: { recruiter, token } });
+    res.json({ success: true, data: { recruiter: Recruiter.toPublicRecruiter(recruiter), token } });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }

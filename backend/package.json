@@ -8,7 +8,17 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "migrate": "node db/migrate.js",
-    "test": "node tests/core.test.js && node tests/api.test.js"
+    "test": "node tests/crypto.test.js && node tests/redaction.test.js && node tests/core.test.js && node tests/api.test.js",
+    "test:e2e": "node tests/e2e.test.js",
+    "test:workflow": "node tests/e2e.workflow.test.js",
+    "test:all": "npm test && npm run test:e2e && npm run test:workflow && npm run pii:verify && node scripts/check-fixtures.js",
+    "pii:inventory": "node scripts/inventory-pii.js",
+    "pii:backfill": "node scripts/backfill-nin-bvn.js",
+    "pii:backfill:verify": "node scripts/backfill-nin-bvn.js --verify",
+    "pii:photos": "node scripts/extract-photos.js --dry-run",
+    "pii:photos:apply": "node scripts/extract-photos.js --apply",
+    "pii:photos:verify": "node scripts/extract-photos.js --verify",
+    "pii:verify": "node scripts/verify-migration.js"
   },
   "dependencies": {
     "bcrypt": "^5.1.1",

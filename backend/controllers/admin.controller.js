@@ -1,10 +1,47 @@
 import * as Job from '../models/job.model.js';
 import * as VerificationCode from '../models/verificationCode.model.js';
 import * as Report from '../models/report.model.js';
+import * as Recruiter from '../models/recruiter.model.js';
 import * as AuditLog from '../models/auditLog.model.js';
 import { generateVerificationCode } from '../services/qrcode.service.js';
+import { sendVerificationCompromisedEmail } from '../services/email.service.js';
 import { logEvent } from '../services/audit.service.js';
 import { query } from '../config/database.js';
+import { getImageById } from '../services/storage.service.js';
+import { redactSensitive } from '../middleware/logRedaction.js';
+import { isSuperAdmin } from '../middleware/roles.js';
+
+// Photos are decrypted into memory and streamed once — never cached, never
+// logged, never embedded in list/detail payloads (see getReviewDetails).
+export const getMedia = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!/^[0-9a-f-]{36}$/i.test(id)) {
+      return res.status(400).json({ success: false, error: 'Invalid photo id' });
+    }
+    const { buffer, mimeType, row } = await getImageById(id);
+    // Only recruiters' own photos are admin-visible; other owner types require
+    // an explicit policy decision before exposure.
+    if (row.owner_type !== 'recruiter') {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+    res.set({
+      'Content-Type': mimeType,
+      'Content-Length': String(buffer.length),
+      'Cache-Control': 'no-store, no-cache, must-revalidate, private',
+      'Pragma': 'no-cache',
+      'X-Robots-Tag': 'noindex, nofollow',
+      'Content-Disposition': 'inline',
+    });
+    return res.end(buffer);
+  } catch (error) {
+    if (/not found/i.test(error.message)) {
+      return res.status(404).json({ success: false, error: 'Photo not found' });
+    }
+    return res.status(500).json({ success: false, error: 'Unable to load photo' });
+  }
+};
+
 
 export const getRecruiters = async (req, res) => {
   try {
@@ -108,14 +145,25 @@ export const getReviewDetails = async (req, res) => {
       delete job.recruiter.password_hash;
       delete job.recruiter.nin;
       delete job.recruiter.bvn;
+      delete job.recruiter.nin_enc;
+      delete job.recruiter.bvn_enc;
+      delete job.recruiter.email_otp;
+      delete job.recruiter.phone_otp;
+      delete job.recruiter.phone_otp_reference_id;
     }
+
+    // Never ship raw provider responses verbatim: they can embed base64 ID
+    // photos. Redact image payloads and 11-digit IDs; admins view photos via
+    // GET /api/admin/photo/:id (decrypted in memory, no-store) instead.
+    const sanitizeChecks = (rows) =>
+      rows.map((r) => ({ ...r, raw_response: redactSensitive(r.raw_response) }));
 
     res.json({
       success: true,
       data: {
         ...job,
-        recruiterChecks: recruiterChecks.rows,
-        companyChecks: companyChecks.rows
+        recruiterChecks: sanitizeChecks(recruiterChecks.rows),
+        companyChecks: sanitizeChecks(companyChecks.rows)
       }
     });
   } catch (error) {
@@ -216,7 +264,11 @@ export const revokeVerification = async (req, res) => {
     const job = await Job.findById(id);
     if (!job) return res.status(404).json({ success: false, error: 'Job not found' });
 
-    // Deactivate all verification codes for this job
+    // Burn the verification code(s) as REVOKED (recruiter-at-fault state)
+    const activeCode = await VerificationCode.findByJobAdId(id);
+    if (activeCode) {
+      await VerificationCode.setStatus(activeCode.id, 'revoked', reason);
+    }
     await VerificationCode.deactivateByJobAdId(id);
 
     // Update job status to revoked
@@ -244,35 +296,303 @@ export const revokeVerification = async (req, res) => {
 
 export const getReports = async (req, res) => {
   try {
-    const text = `
-      SELECT r.*, j.title as job_title, c.name as company_name
-      FROM reports r
-      LEFT JOIN job_advertisements j ON r.job_ad_id = j.id
-      LEFT JOIN companies c ON j.company_id = c.id
-      ORDER BY r.created_at DESC
-    `;
-    const result = await query(text);
-    res.json({ success: true, data: result.rows });
+    const { status, severity, category, finding } = req.query;
+    const rows = await Report.findAll({ status, severity, category, finding });
+    res.json({ success: true, data: rows });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 };
 
+/** Side-by-side investigation payload: verified snapshot vs reported advert. */
+export const getReport = async (req, res) => {
+  try {
+    const detail = await Report.findDetailed(req.params.id);
+    if (!detail) return res.status(404).json({ success: false, error: 'Report not found' });
+    res.json({ success: true, data: detail });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+export const escalateReport = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body || {};
+    const existing = await Report.findById(id);
+    if (!existing) return res.status(404).json({ success: false, error: 'Report not found' });
+
+    const note = reason
+      ? `${existing.admin_notes ? existing.admin_notes + '\n' : ''}[Escalated] ${reason}`
+      : existing.admin_notes;
+    const report = await Report.update(id, {
+      status: 'escalated',
+      escalated_at: new Date(),
+      assigned_to: existing.assigned_to || req.admin.id,
+      admin_notes: note,
+    });
+
+    await logEvent('REPORT_ESCALATED', req.admin.id, 'admin', id, 'report',
+      { reason: reason || null, severity: report.severity }, req.ip, req.get('User-Agent'));
+
+    res.json({ success: true, data: report });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * THE VICTIM-PROTECTING FLOW (finding: credential_misuse / impersonation):
+ * burn the cloned code as `compromised`, issue a fresh QR/PIN for the SAME
+ * approved advert (original validity window kept), and notify the recruiter.
+ * The job and the recruiter are untouched.
+ */
+const compromiseAndReissue = async (jobAdId, reason, adminId, req) => {
+  const activeCode = await VerificationCode.findByJobAdId(jobAdId);
+  if (!activeCode) {
+    const err = new Error('No active verification code for this advert.');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  await VerificationCode.setStatus(activeCode.id, 'compromised', reason);
+
+  // Keep the original validity window — a clone must not extend it.
+  const expiresAt = new Date(activeCode.expires_at);
+  const qrData = await generateVerificationCode(jobAdId, expiresAt);
+  const newCode = await VerificationCode.reissueForJob({
+    jobAdId,
+    pin: qrData.pin,
+    qrCodeUrl: qrData.qrCodeUrl,
+    qrCodePath: qrData.qrCodeImagePath,
+    expiresAt,
+    previousId: activeCode.id,
+  });
+
+  // Notify the innocent recruiter (best effort — never fail the action).
+  const rec = await query(
+    `SELECT r.email, r.first_name, j.title
+     FROM recruiters r JOIN job_advertisements j ON j.recruiter_id = r.id
+     WHERE j.id = $1`,
+    [jobAdId],
+  );
+  if (rec.rowCount) {
+    try {
+      await sendVerificationCompromisedEmail({
+        to: rec.rows[0].email,
+        recruiterName: rec.rows[0].first_name,
+        jobTitle: rec.rows[0].title,
+        newPin: qrData.pin,
+        qrCodeUrl: qrData.qrCodeUrl,
+      });
+    } catch (err) {
+      console.error('Compromise notice delivery failed:', err.message);
+    }
+  }
+
+  await logEvent('VERIFICATION_CODE_COMPROMISED', adminId, 'admin', activeCode.id, 'verification_code',
+    { jobAdId, oldPin: activeCode.pin, newPin: qrData.pin, reason },
+    req?.ip, req?.get?.('User-Agent'));
+
+  return {
+    oldPin: activeCode.pin,
+    newPin: qrData.pin,
+    qrCodeUrl: qrData.qrCodeUrl,
+    expiresAt,
+    newCodeId: newCode.id,
+  };
+};
+
+/** POST /reports/:id/compromise — standalone compromise + reissue action. */
+export const compromiseCode = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body || {};
+    const existing = await Report.findById(id);
+    if (!existing) return res.status(404).json({ success: false, error: 'Report not found' });
+
+    const reissue = await compromiseAndReissue(
+      existing.job_ad_id,
+      reason || 'QR/PIN misuse confirmed during report review',
+      req.admin.id,
+      req,
+    );
+
+    // Link the burned credential to the report for the audit trail.
+    const burned = await VerificationCode.findByPin(reissue.oldPin);
+    if (burned && !existing.verification_code_id) {
+      await Report.update(id, { verification_code_id: burned.id });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        reissue,
+        message: 'Verification code marked as compromised and reissued. The recruiter stays verified and has been notified.',
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+};
+
+const ALLOWED_RESOLUTIONS = new Set([
+  'no_action', 'warning_issued', 'correction_requested',
+  'revoke_verification', 'compromise_reissue', 'account_sanction',
+]);
+
 export const updateReport = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, adminNotes } = req.body;
+    const { status, finding, severity, adminNotes, resolutionAction, assignedTo } = req.body || {};
     const adminId = req.admin.id;
 
-    const report = await Report.updateStatus(id, status, adminNotes);
+    const existing = await Report.findById(id);
+    if (!existing) return res.status(404).json({ success: false, error: 'Report not found' });
 
-    await logEvent(
-      'REPORT_UPDATED', adminId, 'admin', id, 'report',
-      { status, adminNotes },
-      req.ip, req.get('User-Agent')
-    );
+    if (status && !Report.STATUSES.has(status)) {
+      return res.status(400).json({ success: false, error: `Invalid status '${status}'` });
+    }
+    if (finding && !Report.FINDINGS.has(finding)) {
+      return res.status(400).json({ success: false, error: `Invalid finding '${finding}'` });
+    }
+    if (severity && !['low', 'medium', 'high'].includes(severity)) {
+      return res.status(400).json({ success: false, error: `Invalid severity '${severity}'` });
+    }
 
-    res.json({ success: true, data: report });
+    // ---- chain of responsibility ----------------------------------------
+    // ACCOUNT-level sanctions are Super Admin only. Everything else
+    // (analysis, findings, warnings, revocation, compromise-reissue) is Admin.
+    if (resolutionAction && !ALLOWED_RESOLUTIONS.has(resolutionAction)) {
+      return res.status(400).json({ success: false, error: `Invalid resolution action '${resolutionAction}'` });
+    }
+    if (resolutionAction === 'account_sanction' && !isSuperAdmin(req.admin.role)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden: account sanctions require super administrator privileges.',
+      });
+    }
+
+    const patch = {};
+    if (status) patch.status = status;
+    if (finding) patch.finding = finding;
+    if (severity) patch.severity = severity;
+    if (adminNotes !== undefined) patch.admin_notes = adminNotes;
+    if (assignedTo !== undefined) patch.assigned_to = assignedTo;
+    if (status === 'under_review' && !existing.assigned_to) patch.assigned_to = adminId;
+
+    let sideEffect = null;
+
+    if (resolutionAction) {
+      const finalFinding = finding || existing.finding;
+      if (!finalFinding) {
+        return res.status(400).json({ success: false, error: 'A finding is required before resolving this report.' });
+      }
+      patch.finding = finalFinding;
+      patch.resolution_action = resolutionAction;
+      patch.resolved_by = adminId;
+      patch.status = status || 'resolved';
+
+      if (resolutionAction === 'revoke_verification') {
+        // Admin-level: withdraw the verification for this advert (recruiter
+        // misrepresentation — the verification itself is what failed).
+        const job = await Job.findById(existing.job_ad_id);
+        if (!job) return res.status(404).json({ success: false, error: 'Job not found' });
+        const activeCode = await VerificationCode.findByJobAdId(job.id);
+        if (activeCode) {
+          await VerificationCode.setStatus(activeCode.id, 'revoked', adminNotes || 'Report finding: recruiter misrepresentation');
+        }
+        const flags = job.flags || [];
+        flags.push({
+          type: 'report_resolution',
+          finding: finalFinding,
+          reason: adminNotes || null,
+          resolvedBy: adminId,
+          resolvedAt: new Date().toISOString(),
+        });
+        await Job.update(job.id, { status: 'revoked', flags });
+        sideEffect = { revokedVerification: true };
+      } else if (resolutionAction === 'compromise_reissue') {
+        const reissue = await compromiseAndReissue(
+          existing.job_ad_id,
+          adminNotes || 'QR/PIN misuse confirmed during report review',
+          adminId,
+          req,
+        );
+        const burned = await VerificationCode.findByPin(reissue.oldPin);
+        if (burned && !existing.verification_code_id) {
+          patch.verification_code_id = burned.id;
+        }
+        sideEffect = { reissue };
+      } else if (resolutionAction === 'account_sanction') {
+        const job = await Job.findById(existing.job_ad_id);
+        if (!job) return res.status(404).json({ success: false, error: 'Job not found' });
+        const recruiter = await Recruiter.setAccountStatus(job.recruiter_id, {
+          status: 'suspended',
+          reason: `Report ${id} (${finalFinding}): ${adminNotes || 'no reason given'}`,
+          changedBy: adminId,
+        });
+        sideEffect = { recruiter };
+      }
+      // no_action | warning_issued | correction_requested → report-only.
+    }
+
+    const report = await Report.update(id, patch);
+
+    await logEvent('REPORT_UPDATED', adminId, 'admin', id, 'report',
+      {
+        status: report?.status, finding: report?.finding,
+        severity: report?.severity, resolutionAction: resolutionAction || null,
+      },
+      req.ip, req.get('User-Agent'));
+
+    res.json({ success: true, data: report, sideEffect });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * POST /recruiters/:id/status — Super Admin account sanction.
+ * suspend | remove (or reactivate), optionally revoking live ads too.
+ */
+export const setRecruiterAccountStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, reason, revokeAds } = req.body || {};
+    if (!['active', 'suspended', 'removed'].includes(status)) {
+      return res.status(400).json({ success: false, error: `Invalid status '${status}'` });
+    }
+    if (status !== 'active' && !reason) {
+      return res.status(400).json({ success: false, error: 'A reason is required for suspending or removing an account.' });
+    }
+
+    const recruiter = await Recruiter.setAccountStatus(id, {
+      status,
+      reason: reason || null,
+      changedBy: req.admin.id,
+    });
+    if (!recruiter) return res.status(404).json({ success: false, error: 'Recruiter not found' });
+
+    let revokedAds = 0;
+    if (revokeAds && status !== 'active') {
+      const jobs = await query(
+        `SELECT id FROM job_advertisements WHERE recruiter_id = $1 AND status IN ('approved', 'active')`,
+        [id],
+      );
+      for (const j of jobs.rows) {
+        const code = await VerificationCode.findByJobAdId(j.id);
+        if (code) await VerificationCode.setStatus(code.id, 'revoked', reason);
+        await Job.updateStatus(j.id, 'revoked');
+        revokedAds += 1;
+      }
+    }
+
+    await logEvent('RECRUITER_ACCOUNT_STATUS', req.admin.id, 'admin', id, 'recruiter',
+      { status, reason: reason || null, revokedAds },
+      req.ip, req.get('User-Agent'));
+
+    res.json({ success: true, data: { recruiter, revokedAds } });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }

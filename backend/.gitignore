@@ -30,6 +30,15 @@ pids/
 *.seed
 *.pid.lock
 
+# Encrypted photo blobs (ciphertext on disk — never commit, never serve)
+storage/
+storage/**/
+
+# Generated QR images contain live verification PINs — runtime data,
+# served from disk, never committed (untracked 2026-10-08)
+public/qrcodes/
+public/qrcodes/**
+
 # Diagnostic reports
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 

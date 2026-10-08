@@ -79,6 +79,20 @@ async function runMigration() {
     await dbClient.query(sql);
     console.log(`✓ Schema applied successfully.`);
 
+    // Apply every additional migration in filename order (002_, 003_, ...).
+    // 003_drop_plaintext.sql is excluded: it is a destructive Phase-5 manual
+    // migration and must be run explicitly with psql (see its header).
+    const migrationsDir = path.join(__dirname, 'migrations');
+    const extra = fs.readdirSync(migrationsDir)
+      .filter((f) => f.endsWith('.sql') && f !== '001_initial_schema.sql' && f !== '003_drop_plaintext.sql')
+      .sort();
+    for (const file of extra) {
+      console.log(`→ Applying migration (${file})...`);
+      const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
+      await dbClient.query(sql);
+      console.log(`✓ ${file} applied.`);
+    }
+
     // Step 3: Verify created tables
     const tableRes = await dbClient.query(`
       SELECT table_name 

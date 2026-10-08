@@ -3,6 +3,8 @@ import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
 import { rateLimiter } from './middleware/rateLimiter.js';
+import { installLogRedaction, redactedErrorLogger, sanitizeResponses } from './middleware/logRedaction.js';
+import { assertKeyConfigured } from './config/keys.js';
 
 import authRoutes from './routes/auth.routes.js';
 import verifyRoutes from './routes/verify.routes.js';
@@ -12,6 +14,18 @@ import publicRoutes from './routes/public.routes.js';
 import adminRoutes from './routes/admin.routes.js';
 
 dotenv.config();
+
+// Phase 0: fail fast on a missing/malformed encryption key. A server that
+// boots without one would silently write plaintext PII.
+try {
+  assertKeyConfigured();
+} catch (err) {
+  console.error(`FATAL: ${err.message}`);
+  process.exit(1);
+}
+
+// Phase 2: scrub base64 images and 11-digit IDs from all log output.
+installLogRedaction();
 
 import path from 'path';
 
@@ -42,6 +56,11 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', service: 'trusthire-backend' });
 });
 
+// MUST wrap res.json BEFORE routes mount: route handlers call res.json during
+// their own execution, so a downstream middleware would never get the chance
+// to wrap it. Image scrubbing only works if the wrapper is installed first.
+app.use(sanitizeResponses);
+
 app.use('/api/auth', authRoutes);
 app.use('/api/verify', verifyRoutes);
 app.use('/api/company', companyRoutes);
@@ -50,8 +69,7 @@ app.use('/api/public', publicRoutes);
 app.use('/api/admin', adminRoutes);
 
 app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ success: false, error: 'Internal Server Error' });
+  redactedErrorLogger(err, req, res, next);
 });
 
 const PORT = process.env.PORT || 5000;

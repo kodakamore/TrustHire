@@ -1,4 +1,5 @@
 import { query } from '../config/database.js';
+import { hashJobData } from '../services/hash.service.js';
 
 export const create = async (data) => {
   const { 
@@ -68,7 +69,30 @@ export const update = async (id, data) => {
   values.push(id);
   const text = `UPDATE job_advertisements SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${i} RETURNING *`;
   const res = await query(text, values);
-  return res.rows[0];
+  const row = res.rows[0];
+
+  // Keep data_hash in lockstep with content: any edit re-hashes, so the
+  // snapshot-integrity check at public lookup time reflects reality and
+  // never false-positives after a legit pre-approval edit.
+  if (row) {
+    try {
+      const fresh = hashJobData({
+        title: row.title,
+        description: row.description,
+        company_id: row.company_id,
+        location: row.location,
+        employment_type: row.employment_type,
+        salary_range: row.salary_range,
+      });
+      if (row.data_hash !== fresh) {
+        await query('UPDATE job_advertisements SET data_hash = $1 WHERE id = $2', [fresh, id]);
+        row.data_hash = fresh;
+      }
+    } catch (err) {
+      console.error(`data_hash recompute failed for job ${id}: ${err.message}`);
+    }
+  }
+  return row;
 };
 
 export const updateStatus = async (id, status) => {
