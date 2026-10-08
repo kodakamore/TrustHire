@@ -13,26 +13,29 @@ const AdminLogin = () => {
   const handleLogin = async (e) => {
     e.preventDefault();
     setError('');
-    setLoading(true);
 
+    if (!email || !password) {
+      setError('Please enter both email and password.');
+      return;
+    }
+
+    setLoading(true);
     try {
-      // Mock successful login for UI demo if API fails
-      // const res = await adminApi.login(email, password);
-      // localStorage.setItem('admin_token', res.token);
-      
-      // Temporary mock
-      setTimeout(() => {
-        if (email && password) {
-          localStorage.setItem('admin_token', 'mock_admin_token_12345');
-          navigate('/');
-        } else {
-          setError('Please enter both email and password.');
-          setLoading(false);
-        }
-      }, 1000);
-      
+      const res = await adminApi.login(email, password);
+      const token = res?.data?.token;
+      if (!token) {
+        throw new Error(res?.error || res?.message || 'Login failed. Please check your credentials.');
+      }
+      localStorage.setItem('admin_token', token);
+      navigate('/');
     } catch (err) {
-      setError(err.response?.data?.message || 'Login failed. Please check your credentials.');
+      const serverMessage =
+        err.response?.data?.error ||
+        err.response?.data?.message ||
+        (err.request && !err.response
+          ? 'Unable to reach the server. Please try again.'
+          : 'Login failed. Please check your credentials.');
+      setError(serverMessage);
       setLoading(false);
     }
   };

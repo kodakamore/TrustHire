@@ -1,11 +1,25 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { LayoutDashboard, ListChecks, Flag, ScrollText, LogOut, ShieldCheck } from 'lucide-react';
+import adminApi from '../services/api';
+import { getAdminEmail } from '../utils/auth';
 
 const AdminLayout = () => {
   const navigate = useNavigate();
-  // Mock pending count for demonstration
-  const pendingReviewsCount = 5;
+  const [pendingReviewsCount, setPendingReviewsCount] = useState(0);
+  const adminEmail = getAdminEmail();
+
+  useEffect(() => {
+    let mounted = true;
+    adminApi.getStats()
+      .then((res) => {
+        if (mounted && typeof res?.data?.pendingReviews === 'number') {
+          setPendingReviewsCount(res.data.pendingReviews);
+        }
+      })
+      .catch(() => {/* badge simply stays at 0 */});
+    return () => { mounted = false; };
+  }, []);
 
   const handleLogout = () => {
     localStorage.removeItem('admin_token');
@@ -69,9 +83,9 @@ const AdminLayout = () => {
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
               <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center font-bold">
-                A
+                {(adminEmail || 'A').charAt(0).toUpperCase()}
               </div>
-              <span className="text-sm font-medium text-gray-700">System Administrator</span>
+              <span className="text-sm font-medium text-gray-700">{adminEmail || 'System Administrator'}</span>
             </div>
           </div>
         </header>

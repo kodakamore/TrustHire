@@ -1,46 +1,49 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Search, Filter, Eye, AlertCircle } from 'lucide-react';
+import { Search, Filter, Eye, AlertCircle, RefreshCw } from 'lucide-react';
+import adminApi from '../services/api';
+
+const recruiterName = (job) => {
+  const name = [job.recruiter_first_name, job.recruiter_last_name].filter(Boolean).join(' ').trim();
+  return name || job.recruiter_email || 'Unknown recruiter';
+};
+
+// System flags come back as JSONB objects ({type, reason, ...}) or legacy strings.
+const normalizeFlags = (flags) =>
+  (Array.isArray(flags) ? flags : []).map((flag, idx) => {
+    const type = typeof flag === 'string' ? flag : (flag?.type || 'flag');
+    return {
+      key: `${type}-${idx}`,
+      type,
+      reason: typeof flag === 'string' ? null : (flag.reason || null),
+    };
+  });
 
 const ReviewQueue = () => {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
+
+  const loadQueue = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await adminApi.getQueue();
+      setJobs(Array.isArray(res?.data) ? res.data : []);
+    } catch (err) {
+      setError(err.response?.data?.error || err.response?.data?.message || 'Failed to load the review queue.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    // Mock data fetch
-    setTimeout(() => {
-      setJobs([
-        {
-          id: 'j-101',
-          title: 'Senior React Developer',
-          company: 'TechNova Solutions',
-          recruiter: 'Sarah Jenkins',
-          submitted: '2023-10-24T10:30:00Z',
-          flags: ['domain_too_new', 'high_salary']
-        },
-        {
-          id: 'j-102',
-          title: 'Data Entry Clerk - Remote',
-          company: 'FastData Corp',
-          recruiter: 'Unknown User',
-          submitted: '2023-10-24T11:15:00Z',
-          flags: ['company_unverified', 'suspicious_keywords']
-        },
-        {
-          id: 'j-103',
-          title: 'Marketing Manager',
-          company: 'Creative Edge',
-          recruiter: 'Mike Ross',
-          submitted: '2023-10-24T09:00:00Z',
-          flags: []
-        }
-      ]);
-      setLoading(false);
-    }, 1000);
+    loadQueue();
   }, []);
 
   const getFlagColor = (flag) => {
-    if (flag.includes('unverified') || flag.includes('suspicious')) return 'bg-red-100 text-red-800 border-red-200';
+    if (flag.includes('unverified') || flag.includes('suspicious') || flag.includes('rejection') || flag.includes('admin')) return 'bg-red-100 text-red-800 border-red-200';
     return 'bg-amber-100 text-amber-800 border-amber-200';
   };
 
@@ -48,8 +51,31 @@ const ReviewQueue = () => {
     return flag.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
   };
 
+  const visibleJobs = jobs.filter((job) => {
+    if (!search.trim()) return true;
+    const needle = search.toLowerCase();
+    return [job.title, job.company_name, recruiterName(job)]
+      .filter(Boolean)
+      .some(v => String(v).toLowerCase().includes(needle));
+  });
+
   if (loading) {
     return <div className="p-8 text-center text-gray-500">Loading queue...</div>;
+  }
+
+  if (error) {
+    return (
+      <div className="p-8 text-center">
+        <AlertCircle className="mx-auto text-red-500 mb-3" size={32} />
+        <p className="text-sm text-red-600 mb-4">{error}</p>
+        <button
+          onClick={loadQueue}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50"
+        >
+          <RefreshCw size={16} /> Retry
+        </button>
+      </div>
+    );
   }
 
   return (
@@ -62,6 +88,8 @@ const ReviewQueue = () => {
             <input 
               type="text" 
               placeholder="Search queue..." 
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
               className="pl-10 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-blue-500 focus:border-blue-500"
             />
           </div>
@@ -71,13 +99,17 @@ const ReviewQueue = () => {
         </div>
       </div>
 
-      {jobs.length === 0 ? (
+      {visibleJobs.length === 0 ? (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center">
           <div className="w-16 h-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-4">
             <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
           </div>
-          <h3 className="text-lg font-medium text-gray-900 mb-1">No pending reviews. All caught up! 🎉</h3>
-          <p className="text-gray-500">The queue is currently empty.</p>
+          <h3 className="text-lg font-medium text-gray-900 mb-1">
+            {jobs.length === 0 ? 'No pending reviews. All caught up! 🎉' : 'No jobs match your search.'}
+          </h3>
+          <p className="text-gray-500">
+            {jobs.length === 0 ? 'The queue is currently empty.' : 'Try a different search term.'}
+          </p>
         </div>
       ) : (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
@@ -93,24 +125,28 @@ const ReviewQueue = () => {
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {jobs.map((job) => (
+                {visibleJobs.map((job) => (
                   <tr key={job.id} className="hover:bg-gray-50">
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="text-sm font-medium text-gray-900">{job.title}</div>
                       <div className="text-sm text-gray-500">ID: {job.id}</div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-900">{job.company}</div>
-                      <div className="text-sm text-gray-500">{job.recruiter}</div>
+                      <div className="text-sm text-gray-900">{job.company_name || 'Unknown company'}</div>
+                      <div className="text-sm text-gray-500">{recruiterName(job)}</div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {new Date(job.submitted).toLocaleString()}
+                      {job.created_at ? new Date(job.created_at).toLocaleString() : '—'}
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex flex-wrap gap-2">
-                        {job.flags.length > 0 ? job.flags.map(flag => (
-                          <span key={flag} className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${getFlagColor(flag)}`}>
-                            {formatFlag(flag)}
+                        {normalizeFlags(job.flags).length > 0 ? normalizeFlags(job.flags).map(flag => (
+                          <span
+                            key={flag.key}
+                            title={flag.reason || undefined}
+                            className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${getFlagColor(flag.type)}`}
+                          >
+                            {formatFlag(flag.type)}
                           </span>
                         )) : (
                           <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 border border-green-200">
@@ -133,7 +169,7 @@ const ReviewQueue = () => {
             </table>
           </div>
           <div className="bg-gray-50 px-6 py-3 border-t border-gray-200 flex items-center justify-between">
-            <span className="text-sm text-gray-700">Showing <span className="font-medium">1</span> to <span className="font-medium">{jobs.length}</span> of <span className="font-medium">{jobs.length}</span> results</span>
+            <span className="text-sm text-gray-700">Showing <span className="font-medium">1</span> to <span className="font-medium">{visibleJobs.length}</span> of <span className="font-medium">{visibleJobs.length}</span> results</span>
             <div className="flex gap-2">
               <button disabled className="px-3 py-1 border border-gray-300 rounded text-sm text-gray-400 bg-gray-100">Previous</button>
               <button disabled className="px-3 py-1 border border-gray-300 rounded text-sm text-gray-400 bg-gray-100">Next</button>

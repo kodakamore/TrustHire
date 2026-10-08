@@ -1,37 +1,60 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Users, Briefcase, Clock, AlertTriangle, ChevronRight } from 'lucide-react';
+import { Users, Briefcase, Clock, AlertTriangle, ChevronRight, ScrollText } from 'lucide-react';
 import StatsCard from '../components/StatsCard';
+import adminApi from '../services/api';
+
+const humanize = (s) =>
+  String(s || '').split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+
+const activityTone = (eventType = '') => {
+  const type = eventType.toUpperCase();
+  if (type.includes('APPROVED') || type.includes('VERIFIED') || type.includes('RECRUITER_REGISTERED')) return 'success';
+  if (type.includes('REJECTED') || type.includes('REVOKED') || type.includes('COMPROMISED')) return 'danger';
+  if (type.includes('FLAG') || type.includes('ESCALAT') || type.includes('SANCTION')) return 'warning';
+  return 'info';
+};
 
 const Dashboard = () => {
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState({
-    recruiters: 0,
-    verifiedJobs: 0,
+    totalRecruiters: 0,
+    activeVerifications: 0,
     pendingReviews: 0,
     activeReports: 0
   });
+  const [recentActivity, setRecentActivity] = useState([]);
 
   useEffect(() => {
-    // Simulate API call
-    setTimeout(() => {
-      setStats({
-        recruiters: 1245,
-        verifiedJobs: 8432,
-        pendingReviews: 12,
-        activeReports: 3
-      });
-      setLoading(false);
-    }, 800);
+    let mounted = true;
+    const load = async () => {
+      try {
+        const [statsRes, auditRes] = await Promise.all([
+          adminApi.getStats(),
+          adminApi.getAuditLogs({ limit: 6 }),
+        ]);
+        if (!mounted) return;
+        if (statsRes?.data) setStats(statsRes.data);
+        const logs = auditRes?.data?.logs;
+        if (Array.isArray(logs)) {
+          setRecentActivity(logs.map(log => ({
+            id: log.id,
+            action: humanize(log.event_type),
+            target: `${humanize(log.target_type || '')}${log.target_id ? ` · ${String(log.target_id).slice(0, 8)}` : ''}`.trim() || 'System',
+            actor: `${humanize(log.actor_type || 'system')}${log.actor_id ? ` (${String(log.actor_id).slice(0, 8)})` : ''}`,
+            time: log.created_at ? new Date(log.created_at).toLocaleString() : '—',
+            type: activityTone(log.event_type),
+          })));
+        }
+      } catch {
+        // Keep zeroed stats on failure — the page still renders.
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    };
+    load();
+    return () => { mounted = false; };
   }, []);
-
-  const recentActivity = [
-    { id: 1, action: 'Job Approved', target: 'Senior Frontend Developer at TechCorp', actor: 'Admin Sarah', time: '10 mins ago', type: 'success' },
-    { id: 2, action: 'Job Rejected', target: 'Data Entry Clerk (Suspicious)', actor: 'Admin John', time: '1 hour ago', type: 'danger' },
-    { id: 3, action: 'Report Resolved', target: 'Fake company posting', actor: 'Admin Sarah', time: '2 hours ago', type: 'info' },
-    { id: 4, action: 'System Flag', target: 'Multiple rapid postings from single IP', actor: 'System Auto-mod', time: '3 hours ago', type: 'warning' },
-    { id: 5, action: 'Verification Revoked', target: 'XYZ Logistics Ltd', actor: 'Admin Mike', time: '5 hours ago', type: 'danger' },
-  ];
 
   if (loading) {
     return <div className="flex items-center justify-center h-full">Loading dashboard data...</div>;
@@ -45,15 +68,13 @@ const Dashboard = () => {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <StatsCard 
           title="Total Recruiters" 
-          value={stats.recruiters.toLocaleString()} 
+          value={(stats.totalRecruiters || 0).toLocaleString()} 
           icon={<Users size={24} />} 
-          trend={4.2} 
         />
         <StatsCard 
           title="Verified Jobs" 
-          value={stats.verifiedJobs.toLocaleString()} 
+          value={(stats.activeVerifications || 0).toLocaleString()} 
           icon={<Briefcase size={24} />} 
-          trend={12.5} 
         />
         <div className={`bg-white rounded-xl shadow-sm border ${stats.pendingReviews > 0 ? 'border-amber-300 bg-amber-50' : 'border-gray-100'} p-6 flex items-center`}>
           <div className={`p-4 rounded-lg ${stats.pendingReviews > 0 ? 'bg-amber-100 text-amber-600' : 'bg-blue-50 text-blue-600'} mr-5`}>
@@ -85,6 +106,9 @@ const Dashboard = () => {
             </Link>
           </div>
           <div className="p-6">
+            {recentActivity.length === 0 ? (
+              <p className="text-sm text-gray-500">No recent activity recorded yet.</p>
+            ) : (
             <div className="flow-root">
               <ul className="-mb-8">
                 {recentActivity.map((activity, idx) => (
@@ -119,6 +143,7 @@ const Dashboard = () => {
                 ))}
               </ul>
             </div>
+            )}
           </div>
         </div>
 
