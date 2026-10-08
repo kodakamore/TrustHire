@@ -3,38 +3,73 @@ import { useParams, Link } from 'react-router-dom';
 import { Flag, CheckCircle, ArrowLeft } from 'lucide-react';
 import { submitReport } from '../services/api';
 
+// Intake categories -> backend taxonomy. Severity is derived SERVER-SIDE
+// from the category (high-severity auto-escalates to Admin review).
+const CATEGORIES = [
+  { value: 'detail_mismatch', label: 'Details do not match the verified advert' },
+  { value: 'fee_requested', label: 'Looks like a scam / requests money' },
+  { value: 'job_not_real', label: "Position doesn't actually exist" },
+  { value: 'impersonation', label: 'Impersonating a real company' },
+  { value: 'expired_or_revoked', label: 'Code is expired or was revoked' },
+  { value: 'other', label: 'Other' },
+];
+
 export default function Report() {
   const { jobAdId } = useParams();
   const [submitted, setSubmitted] = useState(false);
   const [loading, setLoading] = useState(false);
-  
+  const [errorMsg, setErrorMsg] = useState(null);
+
   const [formData, setFormData] = useState({
     jobReference: jobAdId || '',
     email: '',
     phone: '',
-    reason: 'Misleading Information',
-    description: ''
+    reason: 'detail_mismatch',
+    description: '',
+  });
+
+  // What the seeker SAW on the advert they are holding — the Admin compares
+  // this side-by-side against TrustHire's verified snapshot.
+  const [observed, setObserved] = useState({
+    title: '',
+    company: '',
+    salary: '',
+    url: '',
   });
 
   const handleChange = (e) => {
     setFormData({
       ...formData,
-      [e.target.name]: e.target.value
+      [e.target.name]: e.target.value,
     });
+  };
+
+  const handleObservedChange = (e) => {
+    setObserved({ ...observed, [e.target.name]: e.target.value });
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
+    setErrorMsg(null);
     try {
-      // Simulate API call
-      // await submitReport(formData);
-      await new Promise(r => setTimeout(r, 1000));
-      setSubmitted(true);
+      const label = CATEGORIES.find((c) => c.value === formData.reason)?.label || formData.reason;
+      const res = await submitReport({
+        jobAdId: formData.jobReference,
+        reporterEmail: formData.email || undefined,
+        reporterPhone: formData.phone || undefined,
+        category: formData.reason,
+        reportReason: label,
+        description: formData.description,
+        observedContent: observed,
+      });
+      if (res?.success) setSubmitted(true);
+      else setErrorMsg(res?.error || 'Could not submit your report. Please try again.');
     } catch (err) {
-      console.error(err);
-      // fallback to success for demo
-      setSubmitted(true);
+      setErrorMsg(
+        err?.response?.data?.error ||
+          'Could not submit your report. Please check your connection and try again.',
+      );
     } finally {
       setLoading(false);
     }
@@ -51,7 +86,7 @@ export default function Report() {
           <p className="text-gray-600 mb-8 text-lg">
             Thank you for your report. Our team will review it shortly to ensure the safety of all job seekers.
           </p>
-          <Link 
+          <Link
             to="/"
             className="inline-flex justify-center py-3 px-6 border border-transparent rounded-xl shadow-sm text-base font-medium text-white bg-indigo-600 hover:bg-indigo-700 transition-colors"
           >
@@ -129,12 +164,52 @@ export default function Report() {
               onChange={handleChange}
               className="block w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-indigo-500 focus:border-indigo-500 bg-white"
             >
-              <option value="Misleading Information">Details do not match original ad</option>
-              <option value="Fraudulent Ad">Looks like a scam / requests money</option>
-              <option value="Position Doesn't Exist">Company confirmed position doesn't exist</option>
-              <option value="Impersonation">Impersonating a real company</option>
-              <option value="Other">Other</option>
+              {CATEGORIES.map((c) => (
+                <option key={c.value} value={c.value}>{c.label}</option>
+              ))}
             </select>
+          </div>
+
+          {/* What the seeker actually saw — powers the Admin side-by-side */}
+          <div className="border border-gray-200 rounded-xl p-4 bg-gray-50 space-y-4">
+            <p className="text-sm font-semibold text-gray-700">
+              What does the advert you're looking at say?{' '}
+              <span className="font-normal text-gray-500">(as much as you can fill in)</span>
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <input
+                type="text"
+                name="title"
+                value={observed.title}
+                onChange={handleObservedChange}
+                placeholder="Job title as advertised"
+                className="block w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 text-sm"
+              />
+              <input
+                type="text"
+                name="company"
+                value={observed.company}
+                onChange={handleObservedChange}
+                placeholder="Company name as advertised"
+                className="block w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 text-sm"
+              />
+              <input
+                type="text"
+                name="salary"
+                value={observed.salary}
+                onChange={handleObservedChange}
+                placeholder="Salary as advertised"
+                className="block w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 text-sm"
+              />
+              <input
+                type="text"
+                name="url"
+                value={observed.url}
+                onChange={handleObservedChange}
+                placeholder="Link / site where you saw it"
+                className="block w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 text-sm"
+              />
+            </div>
           </div>
 
           <div>
@@ -151,6 +226,12 @@ export default function Report() {
               className="block w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-indigo-500 focus:border-indigo-500 resize-none"
             />
           </div>
+
+          {errorMsg && (
+            <div className="bg-red-50 border border-red-200 text-red-700 text-sm p-4 rounded-xl">
+              {errorMsg}
+            </div>
+          )}
 
           <div className="pt-2">
             <button

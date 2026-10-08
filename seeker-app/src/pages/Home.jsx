@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Shield, Search, QrCode, FileText, CheckCircle } from 'lucide-react';
 import QRScanner from '../components/QRScanner';
+import InstallBanner from '../components/InstallBanner';
 
 export default function Home() {
   const [pin, setPin] = useState('');
@@ -45,6 +46,8 @@ export default function Home() {
           Check if a job advertisement has been verified on the TrustHire platform to protect yourself from scams.
         </p>
       </section>
+
+      <InstallBanner />
 
       <section className="bg-white p-6 sm:p-8 rounded-2xl shadow-sm border border-gray-100 max-w-xl mx-auto w-full">
         <form onSubmit={handleVerify} className="space-y-6">

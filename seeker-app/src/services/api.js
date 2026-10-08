@@ -18,7 +18,7 @@ export const verifyByQR = async (code) => {
 };
 
 export const submitReport = async (data) => {
-  const response = await api.post('/reports', data);
+  const response = await api.post('/report', data);
   return response.data;
 };
 
