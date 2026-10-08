@@ -163,8 +163,8 @@ const VerifyIdentity = () => {
 
   const handleVerifyPhoneOTP = async (e) => {
     if (e) e.preventDefault();
-    if (!phoneOtp || phoneOtp.length !== 6) {
-      setErrorMsg("Please enter the 6-digit phone verification code.");
+    if (!phoneOtp || phoneOtp.length < 4) {
+      setErrorMsg("Please enter the verification code sent to your phone.");
       return;
     }
     setLoading(true);
@@ -396,13 +396,13 @@ const VerifyIdentity = () => {
                     className="space-y-3 pt-2 bg-indigo-50/50 p-4 rounded-xl border border-indigo-100"
                   >
                     <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider">
-                      Enter 6-Digit SMS Verification Code
+                      Enter SMS Verification Code
                     </label>
                     <div className="flex gap-2 items-center">
                       <input
                         type="text"
                         maxLength="6"
-                        placeholder="123456"
+                        placeholder="Code"
                         value={phoneOtp}
                         onChange={(e) =>
                           setPhoneOtp(e.target.value.replace(/\D/g, ""))
@@ -412,7 +412,7 @@ const VerifyIdentity = () => {
                       />
                       <button
                         type="submit"
-                        disabled={loading || phoneOtp.length !== 6}
+                        disabled={loading || phoneOtp.length < 4}
                         className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold shadow-sm transition"
                       >
                         {loading ? "Verifying..." : "Verify Phone OTP"}

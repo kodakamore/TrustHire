@@ -70,11 +70,14 @@ const makeRequest = async (endpoint, options = {}) => {
     const isTimeout =
       error.name === "AbortError" ||
       error?.cause?.code === "UND_ERR_CONNECT_TIMEOUT";
-    const msg = isTimeout
+    const logMsg = isTimeout
       ? "Cannot reach Dojah API — connection timed out. Set USE_MOCK_API=true in backend/.env for local testing."
       : error.message;
-    console.error("Dojah API error:", error);
-    return { success: false, error: msg };
+    const userMsg = isTimeout
+      ? "The verification service is temporarily unavailable. Please try again shortly."
+      : "The verification service returned an unexpected error. Please try again.";
+    console.error("Dojah API error:", logMsg);
+    return { success: false, error: userMsg };
   }
 };
 

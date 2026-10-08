@@ -435,8 +435,15 @@ export const verifyFace = async (req, res) => {
        ORDER BY created_at DESC LIMIT 1`,
       [req.user.id],
     );
-    const idPhoto =
-      idCheckRes.rows[0]?.raw_response?.data?.entity?.photo || null;
+    // Dojah's NIN lookup returns the photo under entity.photo, but the BVN
+    // endpoint has been observed to use entity.image instead for the same
+    // purpose. Checking only `photo` meant a BVN-only recruiter silently
+    // never got a reference photo at all — face-match would always report
+    // "unavailable" even though a usable photo was sitting right there
+    // under a different key. Check both, in all-caps/field-naming-agnostic
+    // order: photo first (more common), then image as a fallback.
+    const idEntity = idCheckRes.rows[0]?.raw_response?.data?.entity;
+    const idPhoto = idEntity?.photo || idEntity?.image || null;
 
     const matchResult = await DojahService.matchFace(selfie, idPhoto);
     const minMatchScore = parseFloat(process.env.MIN_FACE_MATCH_SCORE || 85.0);
