@@ -13,9 +13,19 @@ export const create = async ({
   environment,
   sessionId,
 }) => {
+  // Idempotent on session_id: Didit's POST /v3/session/ is itself idempotent
+  // per (workflow_id, vendor_data) — while an unfinished session exists it
+  // returns THAT session instead of creating a duplicate (docs: Create
+  // Session → Idempotency). A second "Start Liveness Check" therefore comes
+  // back with the same session_id, and a plain INSERT would raise
+  // duplicate-key on the unique constraint. Upsert instead: keep every
+  // existing field (status, decision, raw audit) and only bump updated_at —
+  // terminal sessions are never reused by Didit, so conflicts are always
+  // still-pending rows.
   const text = `
     INSERT INTO recruiter_face_verifications (recruiter_id, provider, environment, session_id)
     VALUES ($1, $2, $3, $4)
+    ON CONFLICT (session_id) DO UPDATE SET updated_at = now()
     RETURNING *;
   `;
   const res = await query(text, [recruiterId, provider, environment, sessionId]);

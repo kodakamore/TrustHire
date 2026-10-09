@@ -231,6 +231,32 @@ async function main() {
       must(r.json?.data?.faceVerified === false, 'faceVerified should still be false');
     });
 
+    await step('duplicate session create is idempotent (Didit vendor_data reuse)', async () => {
+      // Didit's POST /v3/session/ returns the SAME unfinished session for an
+      // existing (workflow_id, vendor_data) instead of creating a duplicate.
+      // The store must absorb that: same row back, no constraint violation,
+      // status/decision untouched (regression: duplicate-key on
+      // recruiter_face_verifications_session_id_key).
+      const before = await FaceVerification.findLatestByRecruiterId(ids.recruiterA);
+      const again = await FaceVerification.create({
+        recruiterId: ids.recruiterA,
+        provider: 'didit',
+        environment: before.environment,
+        sessionId: before.session_id, // same id — the reused session
+      });
+      must(again.id === before.id, 'reused session must map to the same row');
+      must(again.status === 'pending', `status must be untouched, got ${again.status}`);
+      must(
+        new Date(again.created_at).getTime() === new Date(before.created_at).getTime(),
+        'created_at must not be rewritten on conflict',
+      );
+      const count = await query(
+        'SELECT COUNT(*) AS n FROM recruiter_face_verifications WHERE session_id = $1',
+        [before.session_id],
+      );
+      must(count.rows[0].n === '1', `expected exactly 1 row, got ${count.rows[0].n}`);
+    });
+
     await step('mock capture completion -> approved + recruiter flags + audit row', async () => {
       const r = await api('POST', '/api/verify/face/mock/complete', {
         token: tokenA,

@@ -40,6 +40,19 @@ Key property: **the webhook and the local mock completer share
 `processDiditEvent`** — one state machine, one audit trail, regardless of how
 the verdict arrives.
 
+### Session start is idempotent
+
+Didit's `POST /v3/session/` is idempotent per `(workflow_id, vendor_data)`:
+while an **unfinished** session exists it returns *that* session (still 201)
+instead of creating a duplicate; terminal sessions (`Approved`, `Declined`,
+`Expired`, …) are never reused, so every retry after a finished verdict gets a
+fresh session. The local store mirrors this — `FaceVerification.create` is an
+upsert on the unique `session_id`, so a repeated "Start Liveness Check"
+(double-tap, slow network) attaches to the existing pending row instead of
+raising `duplicate key value violates unique constraint
+recruiter_face_verifications_session_id_key`. The row's status and decision
+fields are never rewritten by the conflict (only `updated_at`).
+
 ## Files
 
 | File | Role |

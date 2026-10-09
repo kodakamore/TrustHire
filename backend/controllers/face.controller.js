@@ -248,12 +248,21 @@ export const startFaceSession = async (req, res) => {
       return res.status(502).json({ success: false, error: session.error });
     }
 
-    await FaceVerification.create({
+    // Upsert, not insert: Didit returns the same unfinished session for the
+    // same (workflow, vendor_data), so a repeated Start must attach to the
+    // existing pending row rather than crash on the unique session_id.
+    const record = await FaceVerification.create({
       recruiterId: recruiter.id,
       provider: 'didit',
       environment: session.environment,
       sessionId: session.sessionId,
     });
+
+    // Defensive: if the attached record already carries a terminal approval
+    // (flags out of sync), don't hand back a verification URL.
+    if (record.status === 'approved') {
+      return res.json({ success: true, data: { alreadyVerified: true } });
+    }
 
     res.json({
       success: true,
@@ -265,7 +274,12 @@ export const startFaceSession = async (req, res) => {
       },
     });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    // Raw driver errors (constraint names, SQL) must not reach the client.
+    console.error('startFaceSession error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Could not start the liveness check. Please try again.',
+    });
   }
 };
 
