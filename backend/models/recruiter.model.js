@@ -96,7 +96,7 @@ export const create = async (data) => {
 
 export const findById = async (id) => {
   const text =
-    "SELECT id, email, first_name, last_name, phone_number, nin, bvn, nin_enc, bvn_enc, nin_key_id, bvn_key_id, email_otp, email_otp_expires_at, phone_otp, phone_otp_expires_at, phone_otp_reference_id, phone_otp_attempts, is_email_verified, is_phone_verified, is_identity_verified, is_face_verified, verification_status, account_status, account_status_reason FROM recruiters WHERE id = $1";
+    "SELECT id, email, first_name, last_name, phone_number, nin, bvn, nin_enc, bvn_enc, nin_key_id, bvn_key_id, email_otp, email_otp_expires_at, email_otp_attempts, phone_otp, phone_otp_expires_at, phone_otp_reference_id, phone_otp_attempts, phone_otp_sent_at, is_email_verified, is_phone_verified, is_identity_verified, is_face_verified, verification_status, account_status, account_status_reason FROM recruiters WHERE id = $1";
   const res = await query(text, [id]);
   return revealIdentifiers(res.rows[0]);
 };

@@ -229,14 +229,14 @@ const main = async () => {
   let adminToken = null;
   let superToken = null;
 
-  await step('register Admin + Super Admin', async () => {
-    const a = await api('POST', '/api/auth/admin/register', { body: { email: ADMIN_EMAIL, password: WF_PASSWORD, role: 'admin' } });
+  await step('register Admin + Super Admin (with bootstrap token)', async () => {
+    const a = await api('POST', '/api/auth/admin/register', { body: { email: ADMIN_EMAIL, password: WF_PASSWORD, role: 'admin', bootstrapToken: process.env.ADMIN_BOOTSTRAP_TOKEN } });
     must([200, 201].includes(a.status) && a.json?.data?.token, `admin register: ${a.status}`);
     adminToken = a.json.data.token;
     const row = await query('SELECT id FROM admins WHERE email = $1', [ADMIN_EMAIL]);
     ids.admin = row.rows[0].id;
 
-    const s = await api('POST', '/api/auth/admin/register', { body: { email: SUPER_EMAIL, password: WF_PASSWORD, role: 'super_admin' } });
+    const s = await api('POST', '/api/auth/admin/register', { body: { email: SUPER_EMAIL, password: WF_PASSWORD, role: 'super_admin', bootstrapToken: process.env.ADMIN_BOOTSTRAP_TOKEN } });
     must([200, 201].includes(s.status) && s.json?.data?.token, `super register: ${s.status}`);
     superToken = s.json.data.token;
     const row2 = await query('SELECT id FROM admins WHERE email = $1', [SUPER_EMAIL]);

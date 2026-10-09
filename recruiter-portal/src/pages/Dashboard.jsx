@@ -23,35 +23,44 @@ const Dashboard = () => {
 
   useEffect(() => {
     const fetchDashboardData = async () => {
-      try {
+      // Independent requests: one failing endpoint must not blank the others.
+      const [statusRes, compRes, jobsRes] = await Promise.allSettled([
+        verify.getStatus(),
+        company.getAll(),
+        job.getAll(),
+      ]);
+
+      if (statusRes.status === 'fulfilled') {
         // Real verification status (drives the progress bar + CTA below)
-        const vRes = await verify.getStatus();
-        const rec = vRes.data?.data;
+        const rec = statusRes.value.data?.data;
         if (rec) {
+          const check = (key, flag) =>
+            rec.checks?.[key] ? rec.checks[key] === 'verified' : !!rec[flag];
           setVerificationStatus({
-            emailVerified: !!rec.is_email_verified,
-            phoneVerified: !!rec.is_phone_verified,
-            identityVerified: !!rec.is_identity_verified,
-            faceVerified: !!rec.is_face_verified,
+            emailVerified: check('email', 'is_email_verified'),
+            phoneVerified: check('phone', 'is_phone_verified'),
+            identityVerified: check('identity', 'is_identity_verified'),
+            faceVerified: check('face', 'is_face_verified'),
             overallStatus: rec.verification_status || 'unverified'
           });
         }
-        // Companies/jobs listing to be wired when the endpoints are ready;
-        // keeping the current placeholders for now.
-        setTimeout(() => {
-          setCompanies([
-            { id: 1, name: 'TechCorp Nigeria', status: 'verified', rcNumber: 'RC123456' }
-          ]);
-          setJobs([
-            { id: 101, title: 'Senior Frontend Developer', company: 'TechCorp Nigeria', status: 'verified', pin: 'X7K9P2', expiresAt: '2026-10-17T00:00:00Z' },
-            { id: 102, title: 'Product Manager', company: 'TechCorp Nigeria', status: 'under_review', pin: null, expiresAt: null }
-          ]);
-          setIsLoading(false);
-        }, 300);
-      } catch (error) {
-        console.error("Error fetching dashboard data", error);
-        setIsLoading(false);
+      } else {
+        console.error('Error fetching verification status', statusRes.reason);
       }
+
+      if (compRes.status === 'fulfilled') {
+        setCompanies(compRes.value.data?.data || []);
+      } else {
+        console.error('Error fetching companies', compRes.reason);
+      }
+
+      if (jobsRes.status === 'fulfilled') {
+        setJobs(jobsRes.value.data?.data || []);
+      } else {
+        console.error('Error fetching jobs', jobsRes.reason);
+      }
+
+      setIsLoading(false);
     };
 
     fetchDashboardData();
@@ -121,10 +130,10 @@ const Dashboard = () => {
                 <li key={comp.id} className="py-4 flex justify-between items-center">
                   <div>
                     <p className="text-sm font-medium text-gray-900">{comp.name}</p>
-                    <p className="text-xs text-gray-500">{comp.rcNumber}</p>
+                    <p className="text-xs text-gray-500">{comp.registration_number || comp.industry}</p>
                   </div>
                   <div className="flex items-center space-x-4">
-                    <StatusBadge status={comp.status} />
+                    <StatusBadge status={comp.verification_status || 'pending'} />
                     <Link to={`/companies/${comp.id}`} className="text-indigo-600 hover:text-indigo-900 text-sm">View</Link>
                   </div>
                 </li>
@@ -154,14 +163,14 @@ const Dashboard = () => {
                   <div className="flex justify-between">
                     <div>
                       <p className="text-sm font-medium text-gray-900">{job.title}</p>
-                      <p className="text-xs text-gray-500">{job.company}</p>
+                      <p className="text-xs text-gray-500">{job.company_name}</p>
                     </div>
-                    <StatusBadge status={job.status} />
+                    <StatusBadge status={job.status === 'approved' ? 'verified' : job.status} />
                   </div>
-                  {job.status === 'verified' && job.pin && (
+                  {job.pin && (
                     <div className="mt-2 flex text-xs text-gray-500 space-x-4">
                       <span>PIN: <span className="font-mono font-medium text-gray-900">{job.pin}</span></span>
-                      <span>Expires: {new Date(job.expiresAt).toLocaleDateString()}</span>
+                      {job.expires_at && <span>Expires: {new Date(job.expires_at).toLocaleDateString()}</span>}
                     </div>
                   )}
                   <div className="mt-2">

@@ -156,6 +156,40 @@ export const getJob = async (req, res) => {
   }
 };
 
+// SECURITY (audit C1): columns a recruiter may edit through PUT /api/job/:id.
+// status/flags/data_hash/recruiter_id are server-set only — the previous code
+// passed the raw request body into the UPDATE, so a client could send
+// `{"status":"approved"}` and self-approve without any verification.
+const JOB_EDITABLE_FIELDS = {
+  title: 'title',
+  description: 'description',
+  location: 'location',
+  employmentType: 'employment_type',
+  employment_type: 'employment_type',
+  type: 'employment_type',
+  salaryRange: 'salary_range',
+  salary_range: 'salary_range',
+  applicationUrl: 'application_url',
+  application_url: 'application_url',
+  applicationEmail: 'application_email',
+  application_email: 'application_email',
+  requirements: 'requirements',
+  benefits: 'benefits',
+  deadline: 'deadline',
+  companyId: 'company_id',
+  company_id: 'company_id',
+};
+
+const pickJobFields = (body) => {
+  const patch = {};
+  for (const [key, value] of Object.entries(body || {})) {
+    const column = JOB_EDITABLE_FIELDS[key];
+    if (column) patch[column] = value;
+    // status, flags, data_hash, recruiter_id, id … are silently dropped
+  }
+  return patch;
+};
+
 export const updateJob = async (req, res) => {
   try {
     const job = await Job.findById(req.params.id);
@@ -167,7 +201,75 @@ export const updateJob = async (req, res) => {
         return res.status(400).json({ success: false, error: 'Can only update pending or rejected jobs' });
     }
 
-    const updatedJob = await Job.update(req.params.id, req.body);
+    // SECURITY (audit C1): only allowlisted content columns survive.
+    const patch = pickJobFields(req.body);
+
+    // Re-gate company_id: a job may only be attached to a company the
+    // recruiter owns AND that has completed corporate-email verification.
+    let company = null;
+    if (patch.company_id !== undefined && patch.company_id !== job.company_id) {
+      company = await Company.findById(patch.company_id);
+      if (!company || company.recruiter_id !== req.user.id) {
+        return res.status(403).json({ success: false, error: 'Forbidden: Invalid company' });
+      }
+      if (!company.is_corporate_email_verified) {
+        const companyDomain = company.website_url ? extractDomain(company.website_url) : 'company.com';
+        return res.status(403).json({
+          success: false,
+          error: `Job advertisements can only be onboarded through a verified official company email (@${companyDomain}). Generic or personal free emails are strictly prohibited on TrustHire. Please verify your corporate work email under Company settings.`
+        });
+      }
+    }
+
+    // The application-email rule applies on edit too, not just create.
+    if (patch.application_email && isPublicEmailDomain(patch.application_email)) {
+      const emailDomain = patch.application_email.split('@')[1];
+      return res.status(400).json({
+        success: false,
+        error: `Application email cannot use a generic/free email provider (@${emailDomain}). Applications must be directed to an official company email address.`
+      });
+    }
+
+    // SECURITY (audit C9): an edited job must NOT inherit stale verdicts.
+    // Re-run the verification engine against the merged record so the flags
+    // the admin will review reflect what is actually being submitted, then
+    // send it back to 'pending' — an edit never self-approves, and a
+    // previously-rejected job returns to the queue rather than staying
+    // silently rejected (or becoming approved) without review.
+    const merged = { ...job, ...patch };
+    if (!company) company = await Company.findById(merged.company_id);
+    const recruiter = await Recruiter.findById(req.user.id);
+
+    const dataHash = hashJobData({
+      title: merged.title,
+      description: merged.description,
+      company_id: merged.company_id,
+      location: merged.location,
+      employment_type: merged.employment_type,
+      salary_range: merged.salary_range,
+      application_url: merged.application_url
+    });
+
+    const verificationResult = await processJobVerification(
+      {
+        title: merged.title,
+        description: merged.description,
+        company_id: merged.company_id,
+        location: merged.location,
+        employment_type: merged.employment_type,
+        salary_range: merged.salary_range,
+        application_url: merged.application_url
+      },
+      recruiter,
+      company
+    );
+
+    const updatedJob = await Job.update(req.params.id, {
+      ...patch,
+      data_hash: dataHash,
+      flags: verificationResult.flags,
+      status: 'pending'
+    });
     res.json({ success: true, data: updatedJob });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });

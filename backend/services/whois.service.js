@@ -184,6 +184,130 @@ const normalizeCompanyTokens = (name) => {
 };
 
 /**
+ * SSRF guard (audit C4): `checkWebsiteContentMatch` fetches a
+ * recruiter-supplied URL server-side. Without validation that is a classic
+ * SSRF primitive — `http://127.0.0.1:5432/`, `http://169.254.169.254/…`
+ * (cloud metadata), RFC1918 hosts, link-local, CGNAT and IPv6 equivalents.
+ *
+ * Rules enforced here:
+ *   - only http/https
+ *   - no embedded credentials (user:pass@host)
+ *   - hostname must resolve (all A/AAAA records) to public unicast space
+ *
+ * Note: there is a residual TOCTOU window between this lookup and the
+ * subsequent connect (DNS rebinding). Closing it fully requires pinning the
+ * connection to the vetted IP (custom dispatcher), which is out of scope
+ * here — the check still blocks the practical, non-adversarial-DNS cases
+ * and every literal-IP/private-host attempt.
+ */
+const PRIVATE_V4_RANGES = [
+  [0, 0, 0, 0, 8], // 0.0.0.0/8   "this network"
+  [10, 0, 0, 0, 8], // 10.0.0.0/8   RFC1918
+  [100, 64, 0, 0, 10], // 100.64.0.0/10 CGNAT (RFC6598)
+  [127, 0, 0, 0, 8], // 127.0.0.0/8  loopback
+  [169, 254, 0, 0, 16], // 169.254.0.0/16 link-local (+ cloud metadata)
+  [172, 16, 0, 0, 12], // 172.16.0.0/12 RFC1918
+  [192, 0, 0, 0, 24], // 192.0.0.0/24 IETF protocol assignments
+  [192, 168, 0, 0, 16], // 192.168.0.0/16 RFC1918
+  [198, 18, 0, 0, 15], // 198.18.0.0/15 benchmarking
+  [224, 0, 0, 0, 4], // 224.0.0.0/4  multicast
+  [240, 0, 0, 0, 4], // 240.0.0.0/4  reserved / broadcast
+];
+
+const ipv4ToInt = (ip) =>
+  ip.split(".").reduce((acc, oct) => acc * 256 + Number(oct), 0);
+
+const isPrivateIPv4 = (ip) => {
+  const value = ipv4ToInt(ip);
+  return PRIVATE_V4_RANGES.some(([a, b, c, d, bits]) => {
+    const base = ((a << 24) | (b << 16) | (c << 8) | d) >>> 0;
+    const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+    return (value & mask) === (base & mask);
+  });
+};
+
+const isPrivateIPv6 = (ip) => {
+  const v = ip.toLowerCase().split("%")[0];
+  if (v === "::" || v === "::1") return true;
+  // IPv4-mapped (::ffff:127.0.0.1) — unwrap and test as IPv4.
+  const mapped = v.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (mapped) return isPrivateIPv4(mapped[1]);
+  const first = (v.split(":")[0] || "0").padStart(4, "0");
+  const group = parseInt(first, 16);
+  if ((group & 0xfe00) === 0xfc00) return true; // fc00::/7 unique local
+  if ((group & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+  if ((group & 0xff00) === 0xff00) return true; // ff00::/8 multicast
+  return false;
+};
+
+const isPrivateAddress = (ip) =>
+  ip.includes(":") ? isPrivateIPv6(ip) : isPrivateIPv4(ip);
+
+/**
+ * Validate a recruiter-supplied URL before fetching it server-side.
+ * Throws an Error when the target is not safe to fetch.
+ * Exported so the test suite can assert literal-IP rejections directly.
+ */
+export const assertPublicUrl = async (rawUrl) => {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error("Invalid URL.");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Only http/https URLs are allowed.");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("URLs with embedded credentials are not allowed.");
+  }
+
+  const dns = await import("node:dns");
+  const { lookup } = dns.promises;
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
+  let addresses;
+  try {
+    addresses = await lookup(hostname, { all: true, verbatim: true });
+  } catch {
+    // Literals that fail lookup (e.g. "[::1]" already stripped above are
+    // checked directly below); unresolved hostnames are simply unsafe.
+    addresses = [{ address: hostname }];
+  }
+  const targets = addresses.length ? addresses.map((a) => a.address) : [hostname];
+  for (const addr of targets) {
+    if (isPrivateAddress(addr)) {
+      throw new Error("URL resolves to a private or internal network.");
+    }
+  }
+  return parsed;
+};
+
+/**
+ * Fetch with a manual redirect loop: each hop is re-validated by
+ * assertPublicUrl, and at most MAX_REDIRECTS hops are followed. A public
+ * first hop that 302s to 169.254.169.254 is the standard SSRF bypass —
+ * this closes it.
+ */
+const safeFetch = async (url, { signal, headers } = {}) => {
+  const MAX_REDIRECTS = 3;
+  let current = await assertPublicUrl(url);
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    const res = await fetch(current.toString(), {
+      signal,
+      headers,
+      redirect: "manual",
+    });
+    if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
+      const next = new URL(res.headers.get("location"), current);
+      current = await assertPublicUrl(next.toString());
+      continue;
+    }
+    return res;
+  }
+  throw new Error("Too many redirects.");
+};
+
+/**
  * A website being reachable proves nothing about who owns it. This performs
  * a best-effort *content* check: does the site's own homepage actually
  * mention the company's name (or its corporate email domain), the way a
@@ -244,9 +368,10 @@ export const checkWebsiteContentMatch = async (
   const timeout = setTimeout(() => controller.abort(), 10000);
 
   try {
-    const res = await fetch(url, {
+    // SECURITY (audit C4): SSRF-guarded fetch — scheme/host vetting plus a
+    // validated redirect loop (see assertPublicUrl / safeFetch above).
+    const res = await safeFetch(url, {
       signal: controller.signal,
-      redirect: "follow",
       headers: {
         "User-Agent":
           "Mozilla/5.0 (compatible; TrustHireBot/1.0; +https://trusthire.example/bot)",
@@ -341,11 +466,16 @@ const dnsSecret = () =>
  * Deterministic per-company token — regenerated from the company id each
  * time via HMAC, so nothing new needs to be stored in the database just to
  * hand the recruiter their verification value.
+ *
+ * SECURITY (audit C13): the HMAC input includes the domain, so a token
+ * issued for company A's old domain cannot validate after the company
+ * switches website_url — ownership proof is bound to the domain it proved.
+ * Rotating DNS_VERIFY_SECRET invalidates every outstanding token.
  */
-export const getDnsVerificationToken = (companyId) => {
+export const getDnsVerificationToken = (companyId, domain = "") => {
   const hmac = crypto
     .createHmac("sha256", dnsSecret())
-    .update(String(companyId))
+    .update(`${companyId}:${domain}`)
     .digest("hex");
   return `trusthire-verify=${hmac.slice(0, 32)}`;
 };
@@ -364,7 +494,7 @@ export const getDnsVerificationInstructions = (websiteUrl, companyId) => {
     // providers that don't allow multiple TXT records at the apex.
     recordHost: "@ (or the bare domain)",
     alternateRecordHost: `_trusthire-verify.${domain}`,
-    recordValue: getDnsVerificationToken(companyId),
+    recordValue: getDnsVerificationToken(companyId, domain),
     instructions: `Add a TXT record for ${domain} with the value shown above at your DNS provider (e.g. Cloudflare, Namecheap, GoDaddy). DNS changes can take a few minutes up to 24-48 hours to propagate.`,
   };
 };
@@ -384,7 +514,7 @@ export const verifyDnsOwnership = async (websiteUrl, companyId) => {
     };
   }
 
-  const expectedToken = getDnsVerificationToken(companyId);
+  const expectedToken = getDnsVerificationToken(companyId, domain);
   const candidates = [domain, `_trusthire-verify.${domain}`];
   const allRecords = [];
   let lookupError = null;

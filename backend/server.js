@@ -25,6 +25,21 @@ try {
   process.exit(1);
 }
 
+// Audit C13: in production the DNS TXT token must be HMAC'd with a strong,
+// dedicated secret — never the JWT_SECRET fallback (rotating JWT for any
+// other reason must not silently re-issue DNS tokens, and a default string
+// would make DNS "proof" forgeable by anyone who read the source).
+if (process.env.NODE_ENV === 'production') {
+  const dnsSecret = process.env.DNS_VERIFY_SECRET || '';
+  if (dnsSecret.length < 16) {
+    console.error(
+      'FATAL: DNS_VERIFY_SECRET must be set to at least 16 characters in production. ' +
+        'Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"',
+    );
+    process.exit(1);
+  }
+}
+
 // Phase 2: scrub base64 images and 11-digit IDs from all log output.
 installLogRedaction();
 

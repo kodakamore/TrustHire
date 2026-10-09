@@ -295,9 +295,30 @@ const main = async () => {
   console.log('\n[admin photo access]');
   let adminToken = null;
 
-  await step('register temp admin', async () => {
+  await step('admin register is locked without bootstrap token (403)', async () => {
+    // Audit C3: once any admin exists, POST /admin/register must refuse
+    // anonymous self-provisioning. (If the table were empty — first run —
+    // an untokened register is legitimately allowed, so only assert 403
+    // when at least one admin already exists.)
+    const admins = await query('SELECT COUNT(*)::int AS n FROM admins');
+    if (admins.rows[0].n > 0) {
+      const r = await api('POST', '/api/auth/admin/register', {
+        body: { email: `locked-${ADMIN_EMAIL}`, password: ADMIN_PW, role: 'super_admin' },
+      });
+      must(r.status === 403, `expected 403 for tokenless admin register, got ${r.status}`);
+      const row = await query('SELECT id FROM admins WHERE email = $1', [`locked-${ADMIN_EMAIL}`]);
+      must(row.rowCount === 0, 'locked admin register created a row anyway');
+    }
+  });
+
+  await step('register temp admin (with bootstrap token)', async () => {
     const r = await api('POST', '/api/auth/admin/register', {
-      body: { email: ADMIN_EMAIL, password: ADMIN_PW, role: 'admin' },
+      body: {
+        email: ADMIN_EMAIL,
+        password: ADMIN_PW,
+        role: 'admin',
+        bootstrapToken: process.env.ADMIN_BOOTSTRAP_TOKEN,
+      },
     });
     must([200, 201].includes(r.status), `admin register failed: ${r.status}`);
     adminToken = r.json?.data?.token;

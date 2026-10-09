@@ -79,7 +79,12 @@ export const verifyEmail = async (req, res) => {
       });
     }
 
-    await Recruiter.update(recruiter.id, { is_email_verified: true });
+    // SECURITY (audit C10 / B2): this endpoint is a Dojah *risk screen*, not
+    // proof that the recruiter controls the mailbox. It previously wrote
+    // is_email_verified=true, letting the signup OTP (the real ownership
+    // proof) be skipped entirely. Keep the risk-screen row for the audit
+    // trail, but never let it flip the verified flag — only /auth/verify-email
+    // and /auth/verify-email-otp (correct, unexpired, unused code) may.
     res.json({ success: true, data: result.data });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -110,6 +115,38 @@ export const sendPhoneOTP = async (req, res) => {
         success: false,
         error: "Please enter a valid phone number (at least 10 digits).",
       });
+    }
+
+    // SECURITY (audit C7): per-account send cooldown — one code per number
+    // per 60s. The per-IP otpRateLimiter on the route is bypassable behind
+    // shared NAT (campus/corporate egress), so this counter is stored on the
+    // account itself.
+    if (
+      recruiter.phone_otp_sent_at &&
+      Date.now() - new Date(recruiter.phone_otp_sent_at).getTime() < 60 * 1000
+    ) {
+      const waitSec = Math.ceil(
+        (60000 - (Date.now() - new Date(recruiter.phone_otp_sent_at).getTime())) /
+          1000,
+      );
+      return res.status(429).json({
+        success: false,
+        error: `Please wait ${waitSec}s before requesting another code.`,
+      });
+    }
+
+    // SECURITY (audit C7): a verified phone number cannot be silently
+    // swapped. If the recruiter asks to send a code to a DIFFERENT number,
+    // the old proof no longer covers the new number — drop the verified
+    // flag so it must be proven again (the pending code addresses the new
+    // number only).
+    const numberChanged =
+      recruiter.is_phone_verified &&
+      recruiter.phone_number &&
+      recruiter.phone_number.replace(/\D/g, "") !==
+        phoneNumber.replace(/\D/g, "");
+    if (numberChanged) {
+      await Recruiter.update(req.user.id, { is_phone_verified: false });
     }
 
     // Optional carrier/validity screening (does not block sending)
@@ -143,6 +180,7 @@ export const sendPhoneOTP = async (req, res) => {
       phone_otp_reference_id: smsResult.data.entity.reference_id,
       phone_otp_expires_at: new Date(Date.now() + 10 * 60 * 1000),
       phone_otp_attempts: 0,
+      phone_otp_sent_at: new Date(),
     });
 
     res.json({

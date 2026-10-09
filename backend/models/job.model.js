@@ -51,11 +51,18 @@ export const findByRecruiterId = async (recruiterId) => {
   return res.rows;
 };
 
+// Column names are interpolated into SQL, so keys must look like plain
+// identifiers (defense-in-depth on top of the controller allowlist — audit C1).
+const SAFE_COLUMN = /^[a-z_][a-z0-9_]*$/;
+
 export const update = async (id, data) => {
   const fields = [];
   const values = [];
   let i = 1;
   for (const [key, value] of Object.entries(data)) {
+    if (!SAFE_COLUMN.test(key)) {
+      throw new Error(`Invalid column name in update: ${key}`);
+    }
     if (key === 'flags') {
         fields.push(`${key} = $${i}::jsonb`);
         values.push(JSON.stringify(value));

@@ -8,6 +8,7 @@ import { job as jobApi } from '../services/api';
 const JobDetails = () => {
   const { id } = useParams();
   const [job, setJob] = useState(null);
+  const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -41,48 +42,35 @@ const JobDetails = () => {
           setJob({
             id: fetchedJob.id,
             title: fetchedJob.title,
-            company: fetchedJob.company_name || 'Verified Company',
+            company: fetchedJob.company_name || 'Company not recorded',
             status: fetchedJob.status === 'approved' ? 'verified' : fetchedJob.status,
             type: fetchedJob.employment_type || 'Full-time',
             location: fetchedJob.location || 'Nigeria',
             salaryRange: fetchedJob.salary_range || 'Competitive',
             createdAt: fetchedJob.created_at,
-            expiresAt: expiresAt || '2026-12-31T00:00:00Z',
-            pin: pin || 'VRF-7K9P-M2Q8',
+            expiresAt: expiresAt || null,
+            // Only ever a real PIN returned by the backend.
+            pin: pin || null,
             // A data URL is an actual PNG — render it directly. A raw link is
             // NOT an image, so encode it via the QR service. No link at all →
-            // keep the demo placeholder.
+            // no QR (the card shows its placeholder).
             qrCodeUrl: qrCodeUrl && qrCodeUrl.startsWith('data:')
               ? qrCodeUrl
               : (qrCodeRawUrl
                   ? `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(qrCodeRawUrl)}`
-                  : 'https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=' + encodeURIComponent('http://localhost:3001/v/VRF-7K9P-M2Q8')),
+                  : null),
             rejectionReason: fetchedJob.rejection_reason || null,
             verifyUrl: qrCodeRawUrl || null,
             applicationUrl: fetchedJob.application_url,
             applicationEmail: fetchedJob.application_email,
             description: fetchedJob.description
           });
+        } else {
+          setError('Job not found.');
         }
       } catch (e) {
-        // Fallback demo mock if backend isn't populated
-        setJob({
-          id,
-          title: 'Senior Frontend Developer',
-          company: 'TechCorp Nigeria Ltd',
-          status: 'verified',
-          type: 'Full-time',
-          location: 'Lagos, Nigeria (Hybrid)',
-          salaryRange: '₦800k - ₦1.2m/month',
-          createdAt: '2026-09-15T10:00:00Z',
-          expiresAt: '2026-12-15T10:00:00Z',
-          pin: 'VRF-7K9P-M2Q8',
-          verifyUrl: 'http://localhost:3000/v/VRF-7K9P-M2Q8',
-          qrCodeUrl: 'https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=http://localhost:3001/v/VRF-7K9P-M2Q8',
-          rejectionReason: null,
-          applicationUrl: 'https://careers.techcorp.ng/apply',
-          applicationEmail: 'recruitment@techcorp.ng'
-        });
+        // Real failure: surface the server's message, never demo data.
+        setError(e.response?.data?.error || 'Could not load this job. It may have been removed.');
       } finally {
         setLoading(false);
       }
@@ -92,6 +80,7 @@ const JobDetails = () => {
   }, [id]);
 
   if (loading) return <div className="p-8 text-center text-gray-500">Loading job details...</div>;
+  if (error) return <div className="p-8 text-center text-red-500">{error}</div>;
   if (!job) return <div className="p-8 text-center text-red-500">Job not found</div>;
 
   const isVerified = job.status === 'verified' || job.status === 'approved';

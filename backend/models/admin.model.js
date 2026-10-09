@@ -23,3 +23,10 @@ export const findById = async (id) => {
   const res = await query(text, [id]);
   return res.rows[0];
 };
+
+// Used by the admin-registration lockdown (audit C3): first-run bootstrap is
+// only permitted while this is zero.
+export const count = async () => {
+  const res = await query('SELECT COUNT(*)::int AS n FROM admins');
+  return res.rows[0].n;
+};

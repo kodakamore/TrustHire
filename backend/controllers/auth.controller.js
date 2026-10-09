@@ -1,11 +1,24 @@
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
+import crypto from "node:crypto";
 import * as Recruiter from "../models/recruiter.model.js";
 import * as Admin from "../models/admin.model.js";
 import { validateEmail } from "../utils/validators.js";
+import { isPublicEmailDomain } from "../utils/domainHelper.js";
 import { sendRegistrationVerificationLink } from "../services/email.service.js";
 import dotenv from "dotenv";
 dotenv.config();
+
+// SECURITY (audit C5): registration/resend OTPs must come from a CSPRNG.
+const generateEmailOtp = () => crypto.randomInt(100000, 1000000).toString();
+
+// SECURITY (audit C6): per-account guess limit for the registration OTP.
+const MAX_EMAIL_OTP_ATTEMPTS = 5;
+
+// SECURITY (audit C10): echoing the OTP/link back in an API response is a
+// dev-only affordance. It requires an EXPLICIT flag — NODE_ENV alone is no
+// longer enough (a misconfigured deploy would leak codes silently).
+const debugAffordancesEnabled = () => process.env.EXPOSE_DEBUG_OTP === "true";
 
 export const register = async (req, res) => {
   try {
@@ -24,6 +37,18 @@ export const register = async (req, res) => {
       return res
         .status(400)
         .json({ success: false, error: "Invalid email address" });
+    }
+    // SECURITY (audit C8 / product rule): a recruiter onboarding identity
+    // must not be a free/public webmail address (gmail, yahoo, outlook...)
+    // — those can never prove a company-domain linkage. Existing accounts
+    // (e.g. yprecious526@gmail.com) are unaffected: this gate only guards
+    // NEW registrations.
+    if (isPublicEmailDomain(email)) {
+      return res.status(400).json({
+        success: false,
+        error:
+          "Please use your official company email address — free email providers (Gmail, Yahoo, Outlook, etc.) are not accepted for recruiter onboarding.",
+      });
     }
     if (!password || password.length < 6) {
       return res
@@ -44,7 +69,7 @@ export const register = async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
 
-    const emailOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    const emailOtp = generateEmailOtp();
     const emailOtpExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
 
     const recruiter = await Recruiter.create({
@@ -88,9 +113,10 @@ export const register = async (req, res) => {
       data: {
         email: recruiter.email,
         requiresVerification: true,
-        verificationLink:
-          process.env.NODE_ENV !== "production" ? verificationLink : undefined,
-        debugOtp: process.env.NODE_ENV !== "production" ? emailOtp : undefined,
+        verificationLink: debugAffordancesEnabled()
+          ? verificationLink
+          : undefined,
+        debugOtp: debugAffordancesEnabled() ? emailOtp : undefined,
       },
     });
   } catch (error) {
@@ -204,10 +230,25 @@ export const verifyEmailOtp = async (req, res) => {
       });
     }
 
+    // SECURITY (audit C6): lock the code after repeated wrong guesses so
+    // the 6-digit space cannot be brute-forced over this endpoint. The
+    // counter is per-account (the per-IP rate limiter on the route is a
+    // separate, bypassable layer) and resets whenever a new code is issued.
+    if ((recruiter.email_otp_attempts || 0) >= MAX_EMAIL_OTP_ATTEMPTS) {
+      return res.status(429).json({
+        success: false,
+        error:
+          "Too many incorrect attempts. Please request a new verification code.",
+      });
+    }
+
     if (
       !recruiter.email_otp ||
       recruiter.email_otp.trim() !== otp.toString().trim()
     ) {
+      await Recruiter.update(recruiter.id, {
+        email_otp_attempts: (recruiter.email_otp_attempts || 0) + 1,
+      });
       return res
         .status(400)
         .json({
@@ -232,6 +273,7 @@ export const verifyEmailOtp = async (req, res) => {
       is_email_verified: true,
       email_otp: null,
       email_otp_expires_at: null,
+      email_otp_attempts: 0,
     });
 
     const authToken = jwt.sign(
@@ -276,12 +318,13 @@ export const resendVerificationEmail = async (req, res) => {
       return res.json({ success: true, message: "Email is already verified." });
     }
 
-    const emailOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    const emailOtp = generateEmailOtp();
     const emailOtpExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
     await Recruiter.update(recruiter.id, {
       email_otp: emailOtp,
       email_otp_expires_at: emailOtpExpiresAt,
+      email_otp_attempts: 0,
     });
 
     const verificationToken = jwt.sign(
@@ -309,7 +352,7 @@ export const resendVerificationEmail = async (req, res) => {
     res.json({
       success: true,
       message: "A new verification link and code have been sent to your email.",
-      debugOtp: process.env.NODE_ENV !== "production" ? emailOtp : undefined,
+      debugOtp: debugAffordancesEnabled() ? emailOtp : undefined,
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -415,7 +458,7 @@ export const adminLogin = async (req, res) => {
 
 export const adminRegister = async (req, res) => {
   try {
-    const { email, password, role } = req.body;
+    const { email, password, role, bootstrapToken } = req.body;
 
     if (!validateEmail(email).valid)
       return res.status(400).json({ success: false, error: "Invalid email" });
@@ -426,6 +469,25 @@ export const adminRegister = async (req, res) => {
           success: false,
           error: "Password must be at least 6 characters",
         });
+
+    // SECURITY (audit C3): this endpoint was unauthenticated — anyone who
+    // could reach it could mint themselves a Super Admin. It now only works
+    // when (a) NO admins exist yet (first-run bootstrap of a fresh install),
+    // or (b) the caller presents the ADMIN_BOOTSTRAP_TOKEN configured on the
+    // server. Without one of those, admin accounts can only be created by an
+    // existing authenticated super admin via the CLI (scripts/create-admin.js).
+    const existingAdmins = await Admin.count();
+    if (existingAdmins > 0) {
+      const configured = process.env.ADMIN_BOOTSTRAP_TOKEN;
+      const presented = req.get("x-bootstrap-token") || bootstrapToken;
+      if (!configured || !presented || presented !== configured) {
+        return res.status(403).json({
+          success: false,
+          error:
+            "Admin registration is locked. An existing super admin must create accounts (see scripts/create-admin.js), or a valid bootstrap token must be supplied.",
+        });
+      }
+    }
 
     const existing = await Admin.findByEmail(email);
     if (existing)

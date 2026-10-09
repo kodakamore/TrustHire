@@ -2,6 +2,7 @@ import { query } from "../config/database.js";
 import {
   checkEmailDomainMatch,
   checkDirectorMatch,
+  extractDomain,
 } from "../utils/domainHelper.js";
 
 /**
@@ -104,14 +105,9 @@ export const processJobVerification = async (jobAd, recruiter, company) => {
   // =========================================================================
   // PILLAR 3: DOMAIN SAFETY & THREAT REPUTATION (WhoisXML + APIVoid)
   // =========================================================================
-  if (!company.is_domain_verified) {
-    flags.push({
-      type: "company_website_not_verified",
-      severity: "warning",
-      reason:
-        "Company website domain has not been verified via WhoisXML & APIVoid.",
-    });
-  }
+  // NOTE: the "website not verified" warning is emitted further below, after
+  // the DNS TXT lookup — a cryptographically-proven domain satisfies this
+  // pillar even when the WHOIS/APIVoid heuristic run hasn't (audit C13).
 
   // Fetch detailed WhoisXML, APIVoid, CAC, website-content and DNS
   // ownership checks for this company
@@ -145,8 +141,24 @@ export const processJobVerification = async (jobAd, recruiter, company) => {
   const contentData = contentCheck.rows[0]?.raw_response;
   // DNS TXT ownership is cryptographic proof, not a heuristic — if it's
   // verified, it outweighs the softer content/text-matching signal below.
+  // SECURITY (audit C13): the proof must be for the domain the company
+  // CURRENTLY claims — a stale dns_ownership row from before a website_url
+  // change no longer proves anything about the new site.
   const dnsOwnershipVerified =
-    dnsCheck.rows[0]?.raw_response?.verified === true;
+    dnsCheck.rows[0]?.raw_response?.verified === true &&
+    dnsCheck.rows[0]?.raw_response?.domain === extractDomain(company.website_url);
+
+  // Emit the pillar-3 warning only when NEITHER signal covers the website:
+  // the WHOIS/APIVoid heuristic run (is_domain_verified) or a domain-bound
+  // DNS TXT proof. DNS proof alone satisfies the pillar.
+  if (!company.is_domain_verified && !dnsOwnershipVerified) {
+    flags.push({
+      type: "company_website_not_verified",
+      severity: "warning",
+      reason:
+        "Company website domain has not been verified via WhoisXML & APIVoid, and no DNS TXT ownership proof is on file.",
+    });
+  }
 
   // Evaluate WhoisXML Domain Age
   if (whoisData) {

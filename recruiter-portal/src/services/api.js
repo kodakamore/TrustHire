@@ -34,7 +34,10 @@ export const auth = {
 
 export const verify = {
   verifyEmail: () => api.post('/verify/email'),
-  verifyPhone: () => api.post('/verify/phone'),
+  // Phone verification is a two-step OTP flow: the backend asks Dojah to
+  // deliver a code, then validates the code the recruiter typed in.
+  sendPhoneOtp: (data) => api.post('/verify/phone/send-otp', data),
+  verifyPhoneOtp: (data) => api.post('/verify/phone/verify-otp', data),
   verifyIdentity: (data) => api.post('/verify/identity', data),
   verifyFace: (data) => api.post('/verify/face', data),
   // Didit-powered face/liveness session flow (Step 4)
@@ -57,6 +60,12 @@ export const company = {
   verifyTIN: (id) => api.post(`/company/${id}/verify/tin`),
   verifyWebsite: (id) => api.post(`/company/${id}/verify/website`),
   getStatus: (id) => api.get(`/company/${id}/status`),
+  // Corporate work-email OTP verification (mandatory before posting jobs)
+  sendCorporateOtp: (id, data) => api.post(`/company/${id}/corporate-email/send-otp`, data),
+  verifyCorporateOtp: (id, data) => api.post(`/company/${id}/corporate-email/verify-otp`, data),
+  // DNS TXT domain-ownership proof (strongest ownership signal)
+  getDnsInstructions: (id) => api.get(`/company/${id}/dns-verification-instructions`),
+  verifyDns: (id) => api.post(`/company/${id}/verify/dns`),
 };
 
 export const job = {

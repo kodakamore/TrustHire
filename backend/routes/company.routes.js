@@ -15,6 +15,7 @@ import {
 } from "../controllers/company.controller.js";
 import { authenticateRecruiter } from "../middleware/auth.js";
 import { auditLogger } from "../middleware/auditLogger.js";
+import { otpRateLimiter } from "../middleware/rateLimiter.js";
 
 const router = express.Router();
 
@@ -41,8 +42,11 @@ router.get(
 router.post("/:id/verify/dns", verifyDns, auditLogger("VERIFY_COMPANY_DNS"));
 
 // Corporate Work Email Verification Endpoints
+// SECURITY (audit C6/C11): the send route is rate-limited per IP on top of
+// the per-account attempt counter enforced in the controller.
 router.post(
   "/:id/corporate-email/send-otp",
+  otpRateLimiter,
   sendCorporateEmailOTP,
   auditLogger("SEND_CORPORATE_EMAIL_OTP"),
 );

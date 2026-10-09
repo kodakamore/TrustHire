@@ -160,6 +160,44 @@ assert.strictEqual(checkDirectorMatch('John', 'Doe', directors).isMatch, false);
 
 console.log('✔ Domain extraction & recruiter linkage verification passed!\n');
 
+// ----------------------------------------------------
+// 6. Audit hardening: public-suffix bypass + SSRF guard
+// ----------------------------------------------------
+console.log('--- [6/6] Testing Public-Suffix Bypass & SSRF Guard ---');
+import { PUBLIC_SUFFIXES } from '../utils/domainHelper.js';
+import { assertPublicUrl } from '../services/whois.service.js';
+
+// C8: a bare public suffix is not a registrable company domain — matching
+// against it must never count as corporate linkage.
+assert.strictEqual(PUBLIC_SUFFIXES.has('com.ng'), true);
+assert.strictEqual(PUBLIC_SUFFIXES.has('co.uk'), true);
+assert.strictEqual(PUBLIC_SUFFIXES.has('github.io'), true);
+
+const suffixEmailBypass = checkEmailDomainMatch('hr@com.ng', 'https://shop.com.ng');
+assert.strictEqual(suffixEmailBypass.isMatch, false, 'bare public suffix email must not match');
+
+const suffixWebsiteBypass = checkEmailDomainMatch('hr@shop.co.uk', 'https://co.uk');
+assert.strictEqual(suffixWebsiteBypass.isMatch, false, 'bare public suffix website must not match');
+
+const subdomainStillWorks = checkEmailDomainMatch('hr@mail.flutterwave.com', 'https://www.flutterwave.com');
+assert.strictEqual(subdomainStillWorks.isMatch, true, 'legit subdomain linkage must still match');
+
+const oneLabelEmail = checkEmailDomainMatch('hr@intranet', 'https://shop.com.ng');
+assert.strictEqual(oneLabelEmail.isMatch, false, 'dotless email domain must not match');
+
+// C4: SSRF guard rejects loopback / link-local / RFC1918 / metadata targets
+const rejects = ['http://127.0.0.1/admin', 'http://10.1.2.3/', 'http://192.168.1.1:8080/',
+  'http://169.254.169.254/latest/meta-data/', 'http://[::1]/', 'http://[fd00::1]/',
+  'file:///etc/passwd', 'ftp://example.com/', 'http://user:pass@example.com/'];
+for (const u of rejects) {
+  await assert.rejects(() => assertPublicUrl(u), `SSRF guard must reject: ${u}`);
+}
+
+// A public IP literal (EXAMPLE domain's address) must be allowed — proves
+// the guard isn't just "reject everything".
+await assertPublicUrl('http://93.184.216.34/');
+console.log('✔ Public-suffix bypass & SSRF guard passed!\n');
+
 console.log('====================================================');
 console.log('✅ ALL BACKEND UNIT TESTS EXECUTED AND PASSED!');
 console.log('====================================================');

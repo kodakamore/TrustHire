@@ -10,6 +10,58 @@ import {
   isPublicEmailDomain,
 } from "../utils/domainHelper.js";
 import { sendCorporateEmailOTP as sendOTPEmail } from "../services/email.service.js";
+import crypto from "node:crypto";
+
+// SECURITY (audit C1): columns a recruiter may edit through PUT /api/company/:id.
+// Verification outcomes (is_*_verified, verification_status, linkage_type),
+// secrets (corporate_email_otp*), and ownership (recruiter_id) are server-set
+// ONLY — any of them arriving in req.body is dropped here, not interpolated
+// into SQL (the previous code passed raw body keys into the UPDATE).
+const COMPANY_EDITABLE_FIELDS = {
+  name: "name",
+  registrationNumber: "registration_number",
+  rcNumber: "registration_number",
+  registration_number: "registration_number",
+  tinNumber: "tin_number",
+  tin: "tin_number",
+  tin_number: "tin_number",
+  websiteUrl: "website_url",
+  website: "website_url",
+  website_url: "website_url",
+  address: "address",
+  industry: "industry",
+};
+
+const pickCompanyProfileFields = (body) => {
+  const patch = {};
+  for (const [key, value] of Object.entries(body || {})) {
+    const column = COMPANY_EDITABLE_FIELDS[key];
+    if (column) patch[column] = value;
+    // anything not in the map (is_cac_verified, corporate_email_otp, ...) is silently dropped
+  }
+  return patch;
+};
+
+// SECURITY (audit C2): corporate_email_otp / its expiry must never leave the
+// server — GET endpoints previously returned the raw row, letting anyone
+// holding a recruiter token read the pending OTP instead of receiving it.
+export const toPublicCompany = (row) => {
+  if (!row) return row;
+  const {
+    corporate_email_otp,
+    corporate_email_otp_expires_at,
+    corporate_email_otp_attempts,
+    ...rest
+  } = row;
+  return rest;
+};
+
+// SECURITY (audit C5): OTPs must come from a CSPRNG, not Math.random().
+const generateOtp = () => crypto.randomInt(100000, 1000000).toString();
+
+// SECURITY (audit C6): per-account guess limit for the corporate-email OTP
+// (independent of the per-IP rate limiter on the send route).
+const MAX_CORPORATE_OTP_ATTEMPTS = 5;
 
 export const createCompany = async (req, res) => {
   try {
@@ -31,7 +83,7 @@ export const createCompany = async (req, res) => {
     }
 
     const company = await Company.create(data);
-    res.status(201).json({ success: true, data: company });
+    res.status(201).json({ success: true, data: toPublicCompany(company) });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -40,7 +92,7 @@ export const createCompany = async (req, res) => {
 export const getCompanies = async (req, res) => {
   try {
     const companies = await Company.findByRecruiterId(req.user.id);
-    res.json({ success: true, data: companies });
+    res.json({ success: true, data: companies.map(toPublicCompany) });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -54,7 +106,7 @@ export const getCompany = async (req, res) => {
       return res
         .status(404)
         .json({ success: false, error: "Company not found" });
-    res.json({ success: true, data: company });
+    res.json({ success: true, data: toPublicCompany(company) });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -73,8 +125,33 @@ export const updateCompany = async (req, res) => {
         .json({ success: false, error: "Cannot update a verified company" });
     }
 
-    const updated = await Company.update(id, req.body);
-    res.json({ success: true, data: updated });
+    // SECURITY (audit C1): only profile columns are accepted; verification
+    // flags/secrets in the body are ignored rather than trusted.
+    const patch = pickCompanyProfileFields(req.body);
+
+    // A body consisting only of forbidden keys (mass-assignment attempt) must
+    // not turn into an empty UPDATE — echo the unchanged record instead.
+    if (Object.keys(patch).length === 0) {
+      return res.json({ success: true, data: toPublicCompany(company) });
+    }
+
+    // Changing the website invalidates every domain-derived result: the old
+    // WHOIS/APIVoid verdict and DNS proof were for a different host (audit C13).
+    if (
+      patch.website_url !== undefined &&
+      patch.website_url !== company.website_url
+    ) {
+      patch.is_domain_verified = false;
+      patch.is_dns_verified = false;
+      // A verified corporate email is tied to the old website domain.
+      if (company.is_corporate_email_verified) {
+        patch.is_corporate_email_verified = false;
+        patch.linkage_type = "unverified";
+      }
+    }
+
+    const updated = await Company.update(id, patch);
+    res.json({ success: true, data: toPublicCompany(updated) });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -377,10 +454,11 @@ export const getVerificationStatus = async (req, res) => {
     res.json({
       success: true,
       data: {
-        ...company,
+        ...toPublicCompany(company),
         checks: {
           cac: derive(company.is_cac_verified, "cac"),
           website: derive(company.is_domain_verified, "whois"),
+          dns: derive(company.is_dns_verified, "dns_ownership"),
           corporateEmail: derive(
             company.is_corporate_email_verified,
             "corporate_email_otp",
@@ -447,14 +525,15 @@ export const sendCorporateEmailOTP = async (req, res) => {
       });
     }
 
-    // 3. Generate 6-digit numeric OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    // 3. Generate 6-digit numeric OTP from a CSPRNG (audit C5)
+    const otp = generateOtp();
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 mins
 
     await Company.update(id, {
       corporate_email: cleanEmail,
       corporate_email_otp: otp,
       corporate_email_otp_expires_at: expiresAt,
+      corporate_email_otp_attempts: 0,
       is_corporate_email_verified: false,
     });
 
@@ -471,7 +550,10 @@ export const sendCorporateEmailOTP = async (req, res) => {
       data: {
         corporateEmail: cleanEmail,
         expiresAt: expiresAt.toISOString(),
-        debugOtp: process.env.NODE_ENV !== "production" ? otp : undefined,
+        // SECURITY (audit C10): echoing the OTP back is a dev-only affordance
+        // gated behind an EXPLICIT flag — production never sets it.
+        debugOtp:
+          process.env.EXPOSE_DEBUG_OTP === "true" ? otp : undefined,
       },
     });
   } catch (error) {
@@ -510,6 +592,17 @@ export const verifyCorporateEmailOTP = async (req, res) => {
         });
     }
 
+    // SECURITY (audit C6): lock the code after repeated wrong guesses.
+    if (
+      (company.corporate_email_otp_attempts || 0) >= MAX_CORPORATE_OTP_ATTEMPTS
+    ) {
+      return res.status(429).json({
+        success: false,
+        error:
+          "Too many incorrect attempts. Please request a new verification code.",
+      });
+    }
+
     if (new Date() > new Date(company.corporate_email_otp_expires_at)) {
       return res
         .status(400)
@@ -520,6 +613,9 @@ export const verifyCorporateEmailOTP = async (req, res) => {
     }
 
     if (company.corporate_email_otp.trim() !== otp.toString().trim()) {
+      await Company.update(id, {
+        corporate_email_otp_attempts: (company.corporate_email_otp_attempts || 0) + 1,
+      });
       return res
         .status(400)
         .json({
@@ -532,6 +628,7 @@ export const verifyCorporateEmailOTP = async (req, res) => {
     await Company.update(id, {
       is_corporate_email_verified: true,
       corporate_email_otp: null,
+      corporate_email_otp_attempts: 0,
       linkage_type: "corporate_email_verified",
     });
 
@@ -632,6 +729,10 @@ export const verifyDns = async (req, res) => {
           "DNS TXT record not found or did not match. DNS changes can take up to 24-48 hours to propagate — please try again shortly after adding the record.",
       });
     }
+
+    // DNS proof is its own flag (audit C13): cryptographic ownership is
+    // recorded distinctly from the WHOIS/APIVoid heuristic verdict.
+    await Company.update(id, { is_dns_verified: true });
 
     res.json({
       success: true,
