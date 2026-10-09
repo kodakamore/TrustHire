@@ -18,7 +18,10 @@ const JobDetails = () => {
           const fetchedJob = res.data.data;
           // Also fetch verification code if approved/verified
           let pin = fetchedJob.pin;
-          let qrCodeUrl = fetchedJob.qr_code_url;
+          // Prefer the ready-made PNG (data URL) from the backend; the raw
+          // qr_code_url is a LINK to the seeker page, not an image.
+          let qrCodeUrl = fetchedJob.qr_code_data_url || null;
+          let qrCodeRawUrl = fetchedJob.qr_code_url || null;
           let expiresAt = fetchedJob.expires_at;
 
           if (fetchedJob.status === 'approved' || fetchedJob.status === 'verified') {
@@ -26,7 +29,8 @@ const JobDetails = () => {
               const vRes = await jobApi.getVerification(id);
               if (vRes.data && vRes.data.data) {
                 pin = vRes.data.data.pin;
-                qrCodeUrl = vRes.data.data.qr_code_url;
+                qrCodeUrl = vRes.data.data.qr_code_data_url || qrCodeUrl;
+                qrCodeRawUrl = vRes.data.data.qr_code_url || fetchedJob.qr_code_url || null;
                 expiresAt = vRes.data.data.expires_at;
               }
             } catch (err) {
@@ -45,8 +49,16 @@ const JobDetails = () => {
             createdAt: fetchedJob.created_at,
             expiresAt: expiresAt || '2026-12-31T00:00:00Z',
             pin: pin || 'VRF-7K9P-M2Q8',
-            qrCodeUrl: qrCodeUrl ? (qrCodeUrl.startsWith('http') ? qrCodeUrl : `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(qrCodeUrl)}`) : 'https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=http://localhost:3001/v/VRF-7K9P-M2Q8',
+            // A data URL is an actual PNG — render it directly. A raw link is
+            // NOT an image, so encode it via the QR service. No link at all →
+            // keep the demo placeholder.
+            qrCodeUrl: qrCodeUrl && qrCodeUrl.startsWith('data:')
+              ? qrCodeUrl
+              : (qrCodeRawUrl
+                  ? `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(qrCodeRawUrl)}`
+                  : 'https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=' + encodeURIComponent('http://localhost:3001/v/VRF-7K9P-M2Q8')),
             rejectionReason: fetchedJob.rejection_reason || null,
+            verifyUrl: qrCodeRawUrl || null,
             applicationUrl: fetchedJob.application_url,
             applicationEmail: fetchedJob.application_email,
             description: fetchedJob.description
@@ -65,6 +77,7 @@ const JobDetails = () => {
           createdAt: '2026-09-15T10:00:00Z',
           expiresAt: '2026-12-15T10:00:00Z',
           pin: 'VRF-7K9P-M2Q8',
+          verifyUrl: 'http://localhost:3000/v/VRF-7K9P-M2Q8',
           qrCodeUrl: 'https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=http://localhost:3001/v/VRF-7K9P-M2Q8',
           rejectionReason: null,
           applicationUrl: 'https://careers.techcorp.ng/apply',

@@ -37,7 +37,7 @@ const VerifiedAdCard = ({ job }) => {
 💰 Salary: ${job.salaryRange || 'Competitive'}
 ${job.applicationUrl ? `🔗 Apply: ${job.applicationUrl}\n` : ''}${job.applicationEmail ? `📧 Email: ${job.applicationEmail}\n` : ''}
 🛡️ VERIFICATION PIN: ${job.pin}
-Scan the QR code or verify manually at: http://localhost:3001/v/${job.pin}
+Scan the QR code or verify manually at: ${job.verifyUrl || `http://localhost:3000/v/${job.pin}`}
 Verified by TrustHire Platform.`;
 
     navigator.clipboard.writeText(textToShare);

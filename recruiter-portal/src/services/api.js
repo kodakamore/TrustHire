@@ -37,21 +37,24 @@ export const verify = {
 };
 
 export const company = {
-  create: (data) => api.post('/companies', data),
-  get: (id) => api.get(`/companies/${id}`),
-  update: (id, data) => api.put(`/companies/${id}`, data),
-  verifyCAC: (id) => api.post(`/companies/${id}/verify-cac`),
-  verifyTIN: (id) => api.post(`/companies/${id}/verify-tin`),
-  verifyWebsite: (id) => api.post(`/companies/${id}/verify-website`),
-  getStatus: (id) => api.get(`/companies/${id}/status`),
+  // Backend mounts these under /api/company (singular) with /:id/verify/<type>
+  create: (data) => api.post('/company', data),
+  getAll: () => api.get('/company'),
+  get: (id) => api.get(`/company/${id}`),
+  update: (id, data) => api.put(`/company/${id}`, data),
+  verifyCAC: (id) => api.post(`/company/${id}/verify/cac`),
+  verifyTIN: (id) => api.post(`/company/${id}/verify/tin`),
+  verifyWebsite: (id) => api.post(`/company/${id}/verify/website`),
+  getStatus: (id) => api.get(`/company/${id}/status`),
 };
 
 export const job = {
-  create: (data) => api.post('/jobs', data),
-  getAll: () => api.get('/jobs'),
-  get: (id) => api.get(`/jobs/${id}`),
-  update: (id, data) => api.put(`/jobs/${id}`, data),
-  getVerification: (id) => api.get(`/jobs/${id}/verification`),
+  // Backend mounts these under /api/job (singular)
+  create: (data) => api.post('/job', data),
+  getAll: () => api.get('/job'),
+  get: (id) => api.get(`/job/${id}`),
+  update: (id, data) => api.put(`/job/${id}`, data),
+  getVerification: (id) => api.get(`/job/${id}/verification`),
 };
 
 export default {

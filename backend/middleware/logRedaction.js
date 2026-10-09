@@ -72,14 +72,41 @@ export const redactedErrorLogger = (err, req, res, next) => {
 
 // ---------------------------------------------------------------------------
 // Response-body sanitizer: scrubs base64 images from every JSON payload
-// leaving the API. Images are never a legitimate response body (photos are
-// served via GET /api/admin/photo/:id, which uses res.end, not res.json).
+// leaving the API. Photos/selfies are never a legitimate response body (they
+// are served via GET /api/admin/photo/:id, which uses res.end, not res.json).
+// EXCEPTION: `qr_code_data_url` is a legitimate small PNG — the recruiter
+// portal renders it directly for the ad flyer. Redacting it broke the QR
+// display entirely.
 // Deliberately does NOT redact 11-digit numbers here: phone numbers are
 // legitimately displayed by clients. ID stripping happens at its own seams
 // (recruiter.model.toPublicRecruiter, verificationCheck.model.create).
 // ---------------------------------------------------------------------------
+const SAFE_IMAGE_KEYS = new Set(['qr_code_data_url']);
+
 export const sanitizeResponses = (req, res, next) => {
   const originalJson = res.json.bind(res);
-  res.json = (payload) => originalJson(redactImages(payload));
+  res.json = (payload) => {
+    // Hold whitelisted image fields aside as placeholders, scrub everything
+    // else, then restore them verbatim.
+    const stash = [];
+    let tagged;
+    try {
+      tagged = JSON.parse(
+        JSON.stringify(payload, (key, value) => {
+          if (SAFE_IMAGE_KEYS.has(key) && typeof value === 'string' && value.startsWith('data:image/')) {
+            stash.push(value);
+            return `__KEEP_IMAGE_${stash.length - 1}__`;
+          }
+          return value;
+        }),
+      );
+    } catch {
+      return originalJson(payload); // non-serializable — let Express handle it
+    }
+    const scrubbed = stash.length
+      ? JSON.stringify(redactImages(tagged)).replace(/"__KEEP_IMAGE_(\d+)__"/g, (_, i) => JSON.stringify(stash[Number(i)]))
+      : redactImages(tagged);
+    return originalJson(typeof scrubbed === 'string' ? JSON.parse(scrubbed) : scrubbed);
+  };
   next();
 };

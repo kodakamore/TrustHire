@@ -43,9 +43,19 @@ const QRCodeDisplay = ({ qrCodeUrl, pin, expiresAt, jobTitle }) => {
         </p>
       )}
       
-      <button className="w-full bg-indigo-600 text-white font-medium py-2 px-4 rounded-lg hover:bg-indigo-700 transition-colors">
-        Download QR Code
-      </button>
+      {qrCodeUrl ? (
+        <a
+          href={qrCodeUrl}
+          download={`trusthire-qr-${(pin || 'code').replace(/[^A-Z0-9]/gi, '')}.png`}
+          className="w-full bg-indigo-600 text-white font-medium py-2 px-4 rounded-lg hover:bg-indigo-700 transition-colors text-center"
+        >
+          Download QR Code
+        </a>
+      ) : (
+        <button className="w-full bg-gray-300 text-white font-medium py-2 px-4 rounded-lg cursor-not-allowed">
+          Download QR Code
+        </button>
+      )}
     </div>
   );
 };
