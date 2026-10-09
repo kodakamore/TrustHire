@@ -25,6 +25,38 @@ export const diditConfig = {
 
 const isPlaceholder = (v) => !v || v.startsWith('your-');
 
+// --- X-Signature-V2 canonical JSON (Didit signs this exact form) ------------
+// Recursively sorted keys, compact separators, Unicode preserved, and
+// whole-valued floats normalised to ints (Python's json.dumps defaults that
+// Didit's signing side uses).
+const shortenFloats = (data) => {
+  if (Array.isArray(data)) return data.map(shortenFloats);
+  if (data !== null && typeof data === 'object') {
+    return Object.fromEntries(
+      Object.entries(data).map(([k, v]) => [k, shortenFloats(v)]),
+    );
+  }
+  if (typeof data === 'number' && !Number.isInteger(data) && data % 1 === 0) {
+    return Math.trunc(data);
+  }
+  return data;
+};
+
+const sortKeys = (data) => {
+  if (Array.isArray(data)) return data.map(sortKeys);
+  if (data !== null && typeof data === 'object') {
+    return Object.keys(data)
+      .sort()
+      .reduce((acc, key) => {
+        acc[key] = sortKeys(data[key]);
+        return acc;
+      }, {});
+  }
+  return data;
+};
+
+const canonicalJson = (obj) => JSON.stringify(sortKeys(shortenFloats(obj)));
+
 export const isMockMode = () => {
   if (process.env.DIDIT_MOCK === 'true') return true;
   if (process.env.DIDIT_MOCK === 'false') return false;
@@ -120,25 +152,73 @@ export const getSession = async (sessionId) => {
 };
 
 /**
- * Verify an HMAC-SHA256 webhook signature over the RAW request body.
- * Accepts `<hex>` or `sha256=<hex>` header formats. Fails closed: with no
- * secret configured, every webhook is rejected.
+ * Verify a Didit webhook request against the current spec
+ * (https://docs.didit.me/integration/webhooks):
+ *
+ *   X-Signature-V2   HMAC-SHA256 over sorted, Unicode-preserved canonical
+ *                    JSON — recommended, survives middleware re-encoding
+ *   X-Signature      HMAC-SHA256 over the exact raw bytes (we read the raw
+ *                    body via express.raw, so this path is also exact)
+ *   X-Timestamp      epoch seconds; reject deliveries older than 5 minutes
+ *
+ * Fails closed: no secret, no timestamp, or a stale timestamp = rejected.
+ * X-Signature-Simple (envelope-only, deprecated) is deliberately NOT
+ * accepted — it does not authenticate the decision body.
  */
-export const verifyWebhookSignature = (rawBody, headerValue) => {
+export const verifyWebhookRequest = (rawBody, parsedBody, { signatureV2, signature, timestamp } = {}) => {
   const secret = diditConfig.webhookSecret;
-  if (!secret || isPlaceholder(secret) || !headerValue) return false;
-  const provided = String(headerValue).replace(/^sha256=/i, '');
-  const expected = crypto
-    .createHmac('sha256', secret)
-    .update(rawBody)
-    .digest('hex');
+  if (!secret || isPlaceholder(secret)) return false;
+
+  // Replay window: Didit stamps every delivery (and re-stamps each retry).
+  const ts = parseInt(timestamp, 10);
+  if (!Number.isFinite(ts)) return false;
+  if (Math.abs(Math.floor(Date.now() / 1000) - ts) > 300) return false;
+
+  const hmac = (input) =>
+    crypto.createHmac('sha256', secret).update(input, 'utf8').digest('hex');
+  const safeEqual = (a, b) => {
+    try {
+      return crypto.timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
+    } catch {
+      return false;
+    }
+  };
+
+  // 1. X-Signature-V2 — canonical JSON (sorted keys, compact, Unicode kept,
+  //    whole-valued floats normalised to ints, exactly as Python would emit).
+  if (signatureV2 && parsedBody && typeof parsedBody === 'object') {
+    if (safeEqual(hmac(canonicalJson(parsedBody)), String(signatureV2).replace(/^sha256=/i, ''))) {
+      return true;
+    }
+  }
+
+  // 2. X-Signature — exact raw bytes.
+  if (signature && rawBody) {
+    return safeEqual(hmac(rawBody), String(signature).replace(/^sha256=/i, ''));
+  }
+
+  return false;
+};
+
+/**
+ * Poll a session's current decision (fallback when webhooks are delayed or
+ * cannot reach localhost during development). V3 returns plural arrays.
+ */
+export const getDecision = async (sessionId) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
   try {
-    return crypto.timingSafeEqual(
-      Buffer.from(provided, 'hex'),
-      Buffer.from(expected, 'hex'),
-    );
-  } catch {
-    return false; // length mismatch / non-hex
+    const res = await fetch(`${diditConfig.baseUrl}/v3/session/${sessionId}/decision/`, {
+      headers: { 'X-Api-Key': diditConfig.apiKey },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    const data = await res.json().catch(() => ({}));
+    return { success: res.ok, data, status: res.status };
+  } catch (err) {
+    clearTimeout(timeout);
+    console.error('Didit getDecision error:', err.message);
+    return { success: false, error: err.message };
   }
 };
 

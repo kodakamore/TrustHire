@@ -18,35 +18,58 @@ import { encryptField } from '../utils/cryptoHelper.js';
 
 const TERMINAL = new Set(['approved', 'declined']);
 
-/** Map any Didit status/decision string onto our lifecycle. */
+/**
+ * Map any Didit status/decision string onto our lifecycle. V3 labels are
+ * exact and case-sensitive on the wire ("Approved", "In Review", "Kyc
+ * Expired" with a single capital K), so this normalises first. Terminal-but-
+ * unsuccessful labels (Declined, Abandoned, Expired) all map to 'declined'
+ * so the recruiter simply gets a retry — none of them mean "passed".
+ */
 const mapStatus = (raw) => {
   const v = String(raw || '').toLowerCase().replace(/[\s-]+/g, '_');
   if (v.includes('approv')) return 'approved';
-  if (v.includes('declin') || v.includes('reject') || v.includes('fail')) return 'declined';
+  if (
+    v.includes('declin') || v.includes('reject') || v.includes('fail') ||
+    v.includes('abandon') || v.includes('expired')
+  ) return 'declined';
   if (v.includes('review')) return 'in_review';
-  return 'pending'; // pending / in_progress / started — no decision yet
+  return 'pending'; // not_started / in_progress / awaiting_user / resubmitted
 };
 
 /**
- * Defensive event parser. Didit events nest session data differently across
- * event types (session.completed vs session.status_changed); extract the
- * fields we need from wherever they appear rather than trusting one shape.
+ * Defensive event parser for the V3 webhook envelope
+ * (docs.didit.me/integration/webhooks):
+ *
+ *   { event_id, session_id, status: "Approved"|..., webhook_type,
+ *     vendor_data, decision: { liveness_checks[], face_matches[], ... } }
+ *
+ * Status labels are exact ("In Review", "Kyc Expired" — single capital K),
+ * so mapping is done case-insensitively. Per-feature results live in plural
+ * arrays (a workflow can include several instances of a feature); we read
+ * the first item of each. Legacy/defensive shapes are still accepted.
  */
 const parseEvent = (event) => {
-  const s = event?.session || event?.data?.session || event?.payload?.session || event || {};
-  const sessionId = s.session_id || s.id || event?.session_id || null;
-  const decisionRaw = s.decision || event?.decision || s.status || event?.status || null;
-  const checks = s.checks || event?.checks || {};
+  const s = event?.session && typeof event.session === 'object' ? event.session : event || {};
+  const decision = s.decision && typeof s.decision === 'object' ? s.decision : {};
+  const sessionId = s.session_id || s.id || null;
+  const decisionRaw = s.status || s.decision || null;
 
-  const livenessRaw = checks?.liveness?.status ?? checks?.liveness_faceauth?.status ?? null;
-  const faceMatchRaw = checks?.face_match?.status ?? checks?.facematch?.status ?? null;
-  const scoreRaw = checks?.face_match?.confidence ?? checks?.face_match?.score ?? null;
+  const firstOf = (arr) => (Array.isArray(arr) && arr.length ? arr[0] : null);
+  const livenessItem = firstOf(decision.liveness_checks) || firstOf(s.liveness_checks);
+  const faceMatchItem = firstOf(decision.face_matches) || firstOf(s.face_matches);
+  // Legacy defensive shape from earlier iterations / mock payloads
+  const checks = s.checks && typeof s.checks === 'object' ? s.checks : {};
+
+  const livenessRaw = livenessItem?.status ?? checks?.liveness?.status ?? checks?.liveness_faceauth?.status ?? null;
+  const faceMatchRaw = faceMatchItem?.status ?? checks?.face_match?.status ?? checks?.facematch?.status ?? null;
+  const scoreRaw = faceMatchItem?.score ?? checks?.face_match?.confidence ?? checks?.face_match?.score ?? null;
   const score = typeof scoreRaw === 'number' ? scoreRaw : parseFloat(scoreRaw);
 
   return {
+    eventId: s.event_id || null,
     sessionId,
     decisionRaw,
-    vendorData: s.vendor_data || event?.vendor_data || null,
+    vendorData: s.vendor_data || null,
     liveness: livenessRaw ? mapStatus(livenessRaw) === 'approved' : null,
     faceMatch: faceMatchRaw && mapStatus(faceMatchRaw) !== 'pending' ? mapStatus(faceMatchRaw) === 'approved' : null,
     faceMatchScore: Number.isFinite(score) ? score : null,
@@ -189,7 +212,29 @@ export const startFaceSession = async (req, res) => {
 
 export const getFaceStatus = async (req, res) => {
   try {
-    const record = await FaceVerification.findLatestByRecruiterId(req.user.id);
+    let record = await FaceVerification.findLatestByRecruiterId(req.user.id);
+
+    // Reconciliation fallback: Didit blocks webhooks to private/localhost
+    // URLs, so during local development the verdict often only arrives here.
+    // If our record is still pending on a real (non-mock) session, ask Didit
+    // for the decision directly and run it through the same state machine.
+    if (
+      record &&
+      record.status === 'pending' &&
+      record.environment !== 'mock' &&
+      Date.now() - new Date(record.created_at).getTime() > 5000 && // give the webhook a head start
+      !Didit.isMockMode()
+    ) {
+      const decision = await Didit.getDecision(record.session_id);
+      if (decision.success && decision.data && (decision.data.status || decision.data.session_id)) {
+        await processDiditEvent(
+          { ...decision.data, session_id: decision.data.session_id || record.session_id },
+          'poll',
+        );
+        record = await FaceVerification.findLatestByRecruiterId(req.user.id);
+      }
+    }
+
     const recruiter = await Recruiter.findById(req.user.id);
     res.json({
       success: true,
@@ -257,28 +302,35 @@ export const completeMockSession = async (req, res) => {
 /**
  * Didit webhook receiver — mounted on RAW body (see routes/webhooks.routes.js)
  * because the HMAC signature covers the exact bytes that arrived.
+ *
+ * Didit signs every delivery three ways (X-Signature-V2 recommended,
+ * X-Signature raw, X-Signature-Simple deprecated); we verify V2 first then
+ * raw, and always enforce the 5-minute X-Timestamp replay window.
  */
 export const diditWebhook = async (req, res) => {
   const raw = Buffer.isBuffer(req.body)
     ? req.body
     : Buffer.from(JSON.stringify(req.body ?? {}));
-  const signature =
-    req.headers['x-signature'] || req.headers['x-hub-signature-256'];
 
-  if (!Didit.verifyWebhookSignature(raw, signature)) {
-    console.warn('Didit webhook rejected: missing/invalid HMAC signature');
-    return res.status(401).send('invalid signature');
-  }
-
-  let event;
+  let parsed = null;
   try {
-    event = JSON.parse(raw.toString('utf8'));
+    parsed = JSON.parse(raw.toString('utf8'));
   } catch {
     return res.status(400).send('invalid json');
   }
 
+  const verified = Didit.verifyWebhookRequest(raw, parsed, {
+    signatureV2: req.headers['x-signature-v2'],
+    signature: req.headers['x-signature'],
+    timestamp: req.headers['x-timestamp'],
+  });
+  if (!verified) {
+    console.warn('Didit webhook rejected: missing/invalid signature or stale timestamp');
+    return res.status(401).send('invalid signature');
+  }
+
   try {
-    const result = await processDiditEvent(event, 'webhook');
+    const result = await processDiditEvent(parsed, 'webhook');
     // Always 200 for anything we understood (including duplicates/unknown
     // sessions) so Didit does not retry-loop on our own bookkeeping.
     if (!result.ok && result.reason !== 'unknown_session') {

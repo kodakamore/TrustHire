@@ -69,6 +69,56 @@ async function api(method, url, { token, body, headers } = {}) {
 const sign = (payload) =>
   crypto.createHmac('sha256', WEBHOOK_SECRET).update(payload).digest('hex');
 
+// Canonical JSON exactly as Didit signs for X-Signature-V2 (sorted keys,
+// compact, whole floats -> ints, Unicode preserved).
+const shortenFloats = (d) => {
+  if (Array.isArray(d)) return d.map(shortenFloats);
+  if (d !== null && typeof d === 'object') {
+    return Object.fromEntries(Object.entries(d).map(([k, v]) => [k, shortenFloats(v)]));
+  }
+  if (typeof d === 'number' && !Number.isInteger(d) && d % 1 === 0) return Math.trunc(d);
+  return d;
+};
+const sortKeys = (d) => {
+  if (Array.isArray(d)) return d.map(sortKeys);
+  if (d !== null && typeof d === 'object') {
+    return Object.keys(d).sort().reduce((acc, k) => { acc[k] = sortKeys(d[k]); return acc; }, {});
+  }
+  return d;
+};
+const signV2 = (obj) =>
+  crypto.createHmac('sha256', WEBHOOK_SECRET)
+    .update(JSON.stringify(sortKeys(shortenFloats(obj))), 'utf8')
+    .digest('hex');
+
+// Headers for a raw-body X-Signature delivery (V3 envelope requires the
+// timestamp Didit always sends; verification rejects >5min skew).
+const deliverHeaders = (payload, extra = {}) => ({
+  'X-Signature': sign(payload),
+  'X-Timestamp': String(Math.floor(Date.now() / 1000)),
+  ...extra,
+});
+
+// A realistic V3 status.updated envelope for an approved session.
+const v3ApprovedEvent = (sessionId, vendorData) => ({
+  event_id: crypto.randomUUID(),
+  webhook_type: 'status.updated',
+  timestamp: Math.floor(Date.now() / 1000),
+  created_at: Math.floor(Date.now() / 1000),
+  environment: 'sandbox',
+  session_id: sessionId,
+  status: 'Approved',
+  vendor_data: vendorData,
+  decision: {
+    session_id: sessionId,
+    status: 'Approved',
+    features: ['LIVENESS'],
+    liveness_checks: [{ node_id: 'liveness_1', status: 'Approved', method: 'PASSIVE', score: 97.5 }],
+    face_matches: [],
+    reviews: [],
+  },
+});
+
 let server = null;
 const startServer = async () => {
   server = spawn(process.execPath, ['server.js'], {
@@ -219,22 +269,19 @@ async function main() {
       hookSession = row;
     });
 
-    await step('signed webhook (APPROVED) -> verified', async () => {
-      const payload = JSON.stringify({
-        session_id: hookSession.session_id,
-        vendor_data: String(ids.recruiterB),
-        decision: 'APPROVED',
-        checks: { liveness: { status: 'APPROVED' } },
-      });
+    await step('signed webhook (V3 Approved envelope) -> verified', async () => {
+      const event = v3ApprovedEvent(hookSession.session_id, String(ids.recruiterB));
+      const payload = JSON.stringify(event);
       const r = await api('POST', '/api/webhooks/didit', {
         body: payload,
-        headers: { 'X-Signature': sign(payload) },
+        headers: deliverHeaders(payload),
       });
       must(r.status === 200, `expected 200, got ${r.status}`);
 
       const row = await query('SELECT * FROM recruiter_face_verifications WHERE session_id = $1', [hookSession.session_id]);
       must(row.rows[0].status === 'approved', `record not approved: ${row.rows[0].status}`);
-      must(row.rows[0].liveness_result === true, 'liveness not recorded');
+      must(row.rows[0].liveness_result === true, 'liveness not recorded from decision.liveness_checks[]');
+      must(row.rows[0].face_match_score === null, 'no face_matches -> score stays null');
 
       const rec = await query('SELECT is_face_verified FROM recruiters WHERE id = $1', [ids.recruiterB]);
       must(rec.rows[0].is_face_verified === true, 'webhook should set is_face_verified');
@@ -243,12 +290,12 @@ async function main() {
     await step('webhook replay (same event) is idempotent', async () => {
       const payload = JSON.stringify({
         session_id: hookSession.session_id,
-        decision: 'APPROVED',
-        checks: { liveness: { status: 'APPROVED' } },
+        status: 'Approved',
+        webhook_type: 'status.updated',
       });
       const r = await api('POST', '/api/webhooks/didit', {
         body: payload,
-        headers: { 'X-Signature': sign(payload) },
+        headers: deliverHeaders(payload),
       });
       must(r.status === 200, `expected 200 on replay, got ${r.status}`);
       const checks = await query(
@@ -258,11 +305,56 @@ async function main() {
       must(checks.rows.length === 1, `replay must not duplicate audit rows, got ${checks.rows.length}`);
     });
 
-    await step('webhook with bad signature -> 401, no state change', async () => {
-      const payload = JSON.stringify({ session_id: `wf-hook-bad-${STAMP}`, decision: 'APPROVED' });
+    await step('X-Signature-V2 (canonical JSON, unsorted body) verifies', async () => {
+      // V2 signs the canonical form — the wire body is deliberately written
+      // with unsorted keys to prove verification does not depend on byte
+      // order, only on the parsed content.
+      const event = v3ApprovedEvent(`wf-v2-${STAMP}`, String(ids.recruiterB));
+      const wireObj = {
+        status: event.status,
+        session_id: event.session_id,
+        decision: event.decision,
+        event_id: event.event_id,
+        webhook_type: event.webhook_type,
+      };
+      const r = await api('POST', '/api/webhooks/didit', {
+        body: JSON.stringify(wireObj),
+        headers: {
+          'X-Signature-V2': signV2(wireObj),
+          'X-Timestamp': String(Math.floor(Date.now() / 1000)),
+        },
+      });
+      // Unknown session (never created) -> acknowledged but must be 200,
+      // proving the signature itself passed (bad signatures get 401).
+      must(r.status === 200, `expected 200 (V2 signature accepted), got ${r.status}`);
+    });
+
+    await step('stale X-Timestamp (>5min) rejected even with valid signature', async () => {
+      const payload = JSON.stringify({ session_id: `wf-stale-${STAMP}`, status: 'Approved' });
       const r = await api('POST', '/api/webhooks/didit', {
         body: payload,
-        headers: { 'X-Signature': 'deadbeef'.repeat(8) },
+        headers: {
+          'X-Signature': sign(payload),
+          'X-Timestamp': String(Math.floor(Date.now() / 1000) - 400),
+        },
+      });
+      must(r.status === 401, `expected 401 on stale timestamp, got ${r.status}`);
+    });
+
+    await step('missing X-Timestamp rejected even with valid signature', async () => {
+      const payload = JSON.stringify({ session_id: `wf-noTs-${STAMP}`, status: 'Approved' });
+      const r = await api('POST', '/api/webhooks/didit', {
+        body: payload,
+        headers: { 'X-Signature': sign(payload) },
+      });
+      must(r.status === 401, `expected 401 without timestamp, got ${r.status}`);
+    });
+
+    await step('webhook with bad signature -> 401, no state change', async () => {
+      const payload = JSON.stringify({ session_id: `wf-hook-bad-${STAMP}`, status: 'Approved' });
+      const r = await api('POST', '/api/webhooks/didit', {
+        body: payload,
+        headers: deliverHeaders(payload, { 'X-Signature': 'deadbeef'.repeat(8) }),
       });
       must(r.status === 401, `expected 401, got ${r.status}`);
       const row = await query('SELECT * FROM recruiter_face_verifications WHERE session_id = $1', [`wf-hook-bad-${STAMP}`]);
@@ -270,10 +362,10 @@ async function main() {
     });
 
     await step('signed webhook for unknown session -> acknowledged, ignored', async () => {
-      const payload = JSON.stringify({ session_id: 'wf-unknown-session', decision: 'APPROVED' });
+      const payload = JSON.stringify({ session_id: 'wf-unknown-session', status: 'Approved' });
       const r = await api('POST', '/api/webhooks/didit', {
         body: payload,
-        headers: { 'X-Signature': sign(payload) },
+        headers: deliverHeaders(payload),
       });
       must(r.status === 200, `expected 200 (acknowledge), got ${r.status}`);
     });
@@ -287,13 +379,20 @@ async function main() {
       });
       faceRecords.push(row.session_id);
       const payload = JSON.stringify({
+        event_id: crypto.randomUUID(),
+        webhook_type: 'status.updated',
         session_id: row.session_id,
-        decision: 'DECLINED',
-        checks: { liveness: { status: 'FAILED' } },
+        status: 'Declined',
+        decision: {
+          session_id: row.session_id,
+          status: 'Declined',
+          liveness_checks: [{ node_id: 'liveness_1', status: 'Declined', score: 41.2 }],
+          face_matches: [],
+        },
       });
       const r = await api('POST', '/api/webhooks/didit', {
         body: payload,
-        headers: { 'X-Signature': sign(payload) },
+        headers: deliverHeaders(payload),
       });
       must(r.status === 200, `expected 200, got ${r.status}`);
       const after = await query('SELECT * FROM recruiter_face_verifications WHERE session_id = $1', [row.session_id]);
@@ -303,6 +402,28 @@ async function main() {
         [row.session_id],
       );
       must(checks.rows.length === 1, 'declined verdict should leave a failed audit row');
+    });
+
+    await step('Abandoned session maps to declined (retryable)', async () => {
+      const row = await FaceVerification.create({
+        recruiterId: ids.recruiterB,
+        provider: 'didit',
+        environment: 'live',
+        sessionId: `wf-hook-abandoned-${STAMP}`,
+      });
+      faceRecords.push(row.session_id);
+      const payload = JSON.stringify({
+        session_id: row.session_id,
+        status: 'Abandoned',
+        decision: { session_id: row.session_id, status: 'Abandoned' },
+      });
+      const r = await api('POST', '/api/webhooks/didit', {
+        body: payload,
+        headers: deliverHeaders(payload),
+      });
+      must(r.status === 200, `expected 200, got ${r.status}`);
+      const after = await query('SELECT status FROM recruiter_face_verifications WHERE session_id = $1', [row.session_id]);
+      must(after.rows[0].status === 'declined', `abandoned should be declined, got ${after.rows[0].status}`);
     });
   } catch (e) {
     failed = true;
