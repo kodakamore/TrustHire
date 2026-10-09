@@ -132,24 +132,7 @@ export const createSession = async ({ recruiterId, callbackUrl }) => {
   }
 };
 
-/** Poll a session's current state (fallback when webhooks are delayed). */
-export const getSession = async (sessionId) => {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
-  try {
-    const res = await fetch(`${diditConfig.baseUrl}/v3/session/${sessionId}/`, {
-      headers: { 'X-Api-Key': diditConfig.apiKey },
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    const data = await res.json().catch(() => ({}));
-    return { success: res.ok, data, status: res.status };
-  } catch (err) {
-    clearTimeout(timeout);
-    console.error('Didit getSession error:', err.message);
-    return { success: false, error: err.message };
-  }
-};
+/** Poll a session's current decision (verdict fallback when webhooks are delayed). */
 
 /**
  * Verify a Didit webhook request against the current spec
