@@ -66,7 +66,7 @@ export default function Home() {
                 onChange={handlePinChange}
                 placeholder="e.g., VRF-A3K9-M2P7"
                 className="block w-full pl-10 pr-3 py-4 border border-gray-300 rounded-xl text-lg font-medium text-center uppercase focus:ring-indigo-500 focus:border-indigo-500"
-                maxLength={13}
+                maxLength={14}
               />
             </div>
           </div>

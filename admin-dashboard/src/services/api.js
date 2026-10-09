@@ -4,6 +4,14 @@ const api = axios.create({
   baseURL: '/api/admin',
 });
 
+// Auth endpoints live under /api/auth (NOT /api/admin). Axios treats a
+// leading-slash path as RELATIVE to baseURL, so login must use its own
+// client — posting '/login' on the admin client hits authenticateAdmin and
+// 401s with "No token provided" before the handler ever runs.
+const authApi = axios.create({
+  baseURL: '/api/auth',
+});
+
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('admin_token');
   if (token) {
@@ -30,7 +38,8 @@ api.interceptors.response.use((response) => {
 
 export const adminApi = {
   // Auth
-  login: (email, password) => api.post('/login', { email, password }).then(res => res.data),
+  // NOTE: separate authApi client — see the comment at its creation above.
+  login: (email, password) => authApi.post('/admin/login', { email, password }).then(res => res.data),
 
   // Review queue
   getQueue: () => api.get('/queue').then(res => res.data),

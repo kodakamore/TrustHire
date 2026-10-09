@@ -7,7 +7,7 @@
  *     cache would be a trust failure. Offline lookups get an explicit
  *     503 so the UI says "can't verify right now" instead of lying.
  */
-const VERSION = 'trusthire-shell-v1';
+const VERSION = 'trusthire-shell-v2';
 const SHELL = [
   '/',
   '/index.html',
@@ -20,15 +20,24 @@ const SHELL = [
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(VERSION).then((cache) =>
-      Promise.all(
-        SHELL.map((url) =>
+    (async () => {
+      const cache = await caches.open(VERSION);
+      // Parse the built index.html for hashed bundle URLs — the app shell is
+      // not usable offline without its JS/CSS, so pre-cache them too.
+      let assets = [];
+      try {
+        const index = await (await fetch('/index.html')).text();
+        assets = [...index.matchAll(/(?:src|href)="(\/(?:assets|icons|scripts)\/[^"]+)"/g)].map((m) => m[1]);
+      } catch { /* offline install: cache what we can */ }
+      await Promise.all(
+        [...SHELL, ...assets].map((url) =>
           cache.add(url).catch(() => {
             /* icon/asset may not exist in dev — shell must still install */
           }),
         ),
-      ),
-    ).then(() => self.skipWaiting()),
+      );
+      await self.skipWaiting();
+    })(),
   );
 });
 
