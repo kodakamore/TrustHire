@@ -29,24 +29,45 @@ const DiditFaceVerification = ({ onComplete }) => {
   const start = async () => {
     setErrorMsg(null);
     setPhase('starting');
+    // MOBILE: window.open() must run while the click "user gesture" is still
+    // active — after an await, iOS Safari/Android Chrome block it as a
+    // popup. Open the placeholder now, navigate it to Didit's URL once the
+    // session comes back. If popups are blocked entirely, popup is null and
+    // the visible "Open camera check" link below becomes the way through.
+    let popup = null;
     try {
+      popup = window.open('about:blank', '_blank');
       const res = await verifyApi.startFaceSession();
       const data = res.data?.data || {};
 
       if (data.alreadyVerified) {
+        if (popup && !popup.closed) popup.close();
         setPhase('approved');
         onComplete?.();
         return;
       }
       if (data.mode === 'mock') {
+        if (popup && !popup.closed) popup.close();
         setPhase('mock');
         return;
       }
-      // Live Didit session — open the hosted capture page and start polling.
+      if (!data.url) {
+        // Never navigate to a missing URL — that's how you get a literal
+        // "broken" about:blank/undefined tab.
+        if (popup && !popup.closed) popup.close();
+        setErrorMsg('The verification service did not return a capture link. Please try again.');
+        setPhase('error');
+        return;
+      }
       setSessionUrl(data.url);
-      window.open(data.url, '_blank', 'noopener');
+      if (popup && !popup.closed) {
+        popup.location.href = data.url;
+        popup.focus?.();
+      }
+      // popup === null (blocked): the anchor in live-waiting is the fallback.
       setPhase('live-waiting');
     } catch (err) {
+      if (popup && !popup.closed) popup.close();
       setErrorMsg(err.response?.data?.error || err.message || 'Could not start verification');
       setPhase('error');
     }
@@ -139,12 +160,20 @@ const DiditFaceVerification = ({ onComplete }) => {
           (blink, turn your head), then return here — this page updates automatically once the
           verified result arrives.
         </p>
-        <div className="flex items-center justify-center gap-3 text-xs">
+        <div className="flex flex-col items-center gap-3 text-xs">
           {sessionUrl && (
-            <a href={sessionUrl} target="_blank" rel="noopener noreferrer" className="text-indigo-600 underline">
-              Re-open verification window
+            <a
+              href={sessionUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="bg-indigo-600 text-white px-4 py-2 rounded-md font-medium hover:bg-indigo-700"
+            >
+              Open the camera check →
             </a>
           )}
+          <p className="text-[11px] text-indigo-500">
+            Nothing opened? Tap the button above — your browser may be blocking the pop-up tab.
+          </p>
           <button
             onClick={() => setPhase('idle')}
             className="text-gray-500 underline"
