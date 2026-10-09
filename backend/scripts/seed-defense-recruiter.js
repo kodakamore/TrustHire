@@ -33,6 +33,8 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { query } from '../config/database.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -192,7 +194,40 @@ const main = async () => {
     phases.push(['Face / liveness', 'SKIPPED (--skip-face) — job will NOT auto-approve']);
   } else {
     log('[5/9] Phase 4 — face / liveness (mock frame path)');
-    const mk = (i) => `data:image/jpeg;base64,${'A'.repeat(5000 + i * 37)}${i}`;
+    // Frames must satisfy BOTH gates on this path: the Dojah mock's
+    // "realistic capture" size check (>= 5KB base64) and the encrypted
+    // photo store's magic-byte sniff (the dashboard self-view photo is
+    // served from that store). Noise-filled PNGs are valid images that
+    // don't deflate away; each frame is distinct, so the anti-replay
+    // identical-frame check passes too.
+    const pngChunk = (type, data) => {
+      const len = Buffer.alloc(4);
+      len.writeUInt32BE(data.length);
+      const typeBuf = Buffer.from(type, 'ascii');
+      const crc = Buffer.alloc(4);
+      crc.writeUInt32BE(zlib.crc32(Buffer.concat([typeBuf, data])) >>> 0);
+      return Buffer.concat([len, typeBuf, data, crc]);
+    };
+    const noisyPng = (size = 96) => {
+      const ihdr = Buffer.alloc(13);
+      ihdr.writeUInt32BE(size, 0);
+      ihdr.writeUInt32BE(size, 4);
+      ihdr[8] = 8; // bit depth
+      ihdr[9] = 2; // color type: truecolor RGB
+      const rows = [];
+      for (let y = 0; y < size; y += 1) {
+        // Filter byte 0 (None) + random pixel data
+        rows.push(Buffer.concat([Buffer.from([0]), crypto.randomBytes(size * 3)]));
+      }
+      const idat = zlib.deflateSync(Buffer.concat(rows));
+      return Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), // PNG signature
+        pngChunk('IHDR', ihdr),
+        pngChunk('IDAT', idat),
+        pngChunk('IEND', Buffer.alloc(0)),
+      ]);
+    };
+    const mk = () => `data:image/png;base64,${noisyPng().toString('base64')}`;
     const fv = await api('POST', '/api/verify/face', { token, body: { frames: [mk(1), mk(2), mk(3)] } });
     must(fv.status === 200 && fv.json?.success, `face failed: ${fv.status} ${JSON.stringify(fv.json)}`);
     phases.push(['Face / liveness', 'verified']);

@@ -21,6 +21,10 @@ const Dashboard = () => {
   const [companies, setCompanies] = useState([]);
   const [jobs, setJobs] = useState([]);
 
+  // Whether a verified-face image actually rendered (photo may legitimately be
+  // absent — the caption below must not promise an image that isn't there).
+  const [hasFacePhoto, setHasFacePhoto] = useState(false);
+
   useEffect(() => {
     const fetchDashboardData = async () => {
       // Independent requests: one failing endpoint must not blank the others.
@@ -80,7 +84,7 @@ const Dashboard = () => {
     <div className="space-y-6">
       <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
         <div className="flex items-center space-x-4">
-          <VerifiedFacePhoto size="h-16 w-16" />
+          <VerifiedFacePhoto size="h-16 w-16" onPhotoState={setHasFacePhoto} />
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Welcome back, Recruiter</h1>
             <p className="text-gray-500">Manage your companies and job advertisements here.</p>
@@ -89,7 +93,9 @@ const Dashboard = () => {
         {verificationStatus.faceVerified && (
           <p className="mt-3 text-xs text-emerald-700 flex items-center">
             <svg className="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"></path></svg>
-            Face verified — this is the image captured during your liveness check.
+            Face verified — {hasFacePhoto
+              ? 'this is the image captured during your liveness check.'
+              : 'your liveness check is recorded in the audit trail.'}
           </p>
         )}
 

@@ -9,7 +9,7 @@ import { verify as verifyApi } from '../services/api';
 // image download from Didit was unavailable at approval time).
 // ===========================================================================
 
-const VerifiedFacePhoto = ({ size = 'h-16 w-16', className = '' }) => {
+const VerifiedFacePhoto = ({ size = 'h-16 w-16', className = '', onPhotoState }) => {
   const [url, setUrl] = useState(null);
 
   useEffect(() => {
@@ -18,11 +18,16 @@ const VerifiedFacePhoto = ({ size = 'h-16 w-16', className = '' }) => {
     (async () => {
       try {
         const res = await verifyApi.getFacePhoto();
-        if (cancelled || !(res.data instanceof Blob) || res.data.size === 0) return;
+        if (cancelled || !(res.data instanceof Blob) || res.data.size === 0) {
+          if (!cancelled) onPhotoState?.(false);
+          return;
+        }
         objectUrl = URL.createObjectURL(res.data);
         setUrl(objectUrl);
+        if (!cancelled) onPhotoState?.(true);
       } catch {
         // 404 = no verified photo yet; auth/network errors are non-fatal here
+        if (!cancelled) onPhotoState?.(false);
       }
     })();
     return () => {

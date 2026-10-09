@@ -1,5 +1,7 @@
 import * as Recruiter from "../models/recruiter.model.js";
 import * as VerificationCheck from "../models/verificationCheck.model.js";
+
+import * as FaceVerification from "../models/faceVerification.model.js";
 import * as DojahService from "../services/dojah.service.js";
 import { query } from "../config/database.js";
 import { putImage, resolvePhotoRef } from "../services/storage.service.js";
@@ -596,6 +598,38 @@ export const verifyFace = async (req, res) => {
       is_face_verified: true,
       verification_status: allVerified ? "verified" : "partially_verified",
     });
+
+    // Persist the capture: an approved face-verification audit record plus the
+    // encrypted verified-face image — the same artifacts the Didit flow
+    // produces, so the dashboard self-view and audit trail behave identically
+    // on every approval path. Best-effort: a storage failure never reverses
+    // the approval (mirrors storeFaceImage in face.controller).
+    try {
+      const faceRecord = await FaceVerification.create({
+        recruiterId: req.user.id,
+        provider: "dojah",
+        environment: process.env.USE_MOCK_API === "true" ? "sandbox" : "live",
+        sessionId: `dojah_frames_${Date.now()}`,
+      });
+      await FaceVerification.markDecision({
+        id: faceRecord.id,
+        status: "approved",
+        livenessResult: true,
+        faceMatch: matchAttempted ? matchPassed : null,
+        faceMatchScore: typeof confidence === "number" ? confidence : null,
+        method: "dojah_frames",
+        verifiedAt: new Date(),
+      });
+      const media = await putImage({
+        payload: selfie,
+        ownerType: "recruiter",
+        ownerId: req.user.id,
+        purpose: "face_liveness",
+      });
+      await FaceVerification.setFacePhotoRef(faceRecord.id, `photo://${media.id}`);
+    } catch (err) {
+      console.warn(`Face photo store error: ${err.message} — verdict unaffected`);
+    }
 
     res.json({
       success: true,
