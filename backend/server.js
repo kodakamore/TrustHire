@@ -12,6 +12,7 @@ import companyRoutes from './routes/company.routes.js';
 import jobRoutes from './routes/job.routes.js';
 import publicRoutes from './routes/public.routes.js';
 import adminRoutes from './routes/admin.routes.js';
+import webhookRoutes from './routes/webhooks.routes.js';
 
 dotenv.config();
 
@@ -46,6 +47,10 @@ app.use(cors(corsOptions));
 app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
+// Provider webhooks (Didit) verify an HMAC over the RAW request bytes, so
+// this mount MUST come before express.json() or the signature will be
+// computed over re-serialized JSON and always fail.
+app.use('/api/webhooks', express.raw({ type: '*/*', limit: '2mb' }), webhookRoutes);
 app.use(express.json({ limit: '10mb' }));
 app.use(rateLimiter);
 

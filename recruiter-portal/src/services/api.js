@@ -33,6 +33,10 @@ export const verify = {
   verifyPhone: () => api.post('/verify/phone'),
   verifyIdentity: (data) => api.post('/verify/identity', data),
   verifyFace: (data) => api.post('/verify/face', data),
+  // Didit-powered face/liveness session flow (Step 4)
+  startFaceSession: () => api.post('/verify/face/session'),
+  getFaceStatus: () => api.get('/verify/face/status'),
+  completeMockFaceSession: () => api.post('/verify/face/mock/complete'),
   getStatus: () => api.get('/verify/status'),
 };
 

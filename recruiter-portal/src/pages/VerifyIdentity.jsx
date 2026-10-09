@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import VerificationProgress from '../components/VerificationProgress';
-import FaceLivenessCapture from '../components/FaceLivenessCapture';
+import DiditFaceVerification from '../components/DiditFaceVerification';
 import { verify as verifyApi } from '../services/api';
 
 const VerifyIdentity = () => {
@@ -15,8 +15,6 @@ const VerifyIdentity = () => {
 
   const [idType, setIdType] = useState('NIN');
   const [idNumber, setIdNumber] = useState('');
-  const [liveSelfieBase64, setLiveSelfieBase64] = useState(null);
-  const [errorMsg, setErrorMsg] = useState(null);
 
   useEffect(() => {
     // Check initial verification status from API if token exists
@@ -86,24 +84,10 @@ const VerifyIdentity = () => {
     }
   };
 
-  const handleLivenessCompleted = async (base64Image) => {
-    setLiveSelfieBase64(base64Image);
-    setLoading(true);
-    setErrorMsg(null);
-
-    try {
-      // Send live frame to backend Dojah liveness & face verification
-      await verifyApi.verifyFace({
-        selfieBase64: base64Image,
-        referencePhotoBase64: base64Image // In production, retrieved from NIN/BVN record
-      });
-      setStatus(prev => ({ ...prev, faceVerified: true }));
-    } catch (err) {
-      // If sandbox credentials not set, verify client-side liveness
-      setStatus(prev => ({ ...prev, faceVerified: true }));
-    } finally {
-      setLoading(false);
-    }
+  // Step 4 (Didit face/liveness): the component drives the whole session
+  // flow internally and reports the terminal approved state here.
+  const handleFaceVerified = () => {
+    setStatus(prev => ({ ...prev, faceVerified: true }));
   };
 
   const renderStepContent = () => {
@@ -214,7 +198,7 @@ const VerifyIdentity = () => {
                 </p>
               </div>
             ) : (
-              <FaceLivenessCapture onCaptureComplete={handleLivenessCompleted} />
+              <DiditFaceVerification onComplete={handleFaceVerified} />
             )}
           </div>
         );
