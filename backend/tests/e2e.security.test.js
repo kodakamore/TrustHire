@@ -9,8 +9,11 @@
 //   • Generic free emails (gmail…) are rejected at recruiter registration (C8)
 //   • Mass-assignment on company/job create+update is ignored (C1)
 //   • corporate_email_otp never appears in company GET responses (C2)
-//   • Email OTP: 5 wrong guesses → 429, resend resets the counter (C6)
+//   • Email OTP: expiry rejected, 5 wrong guesses → 429, resend rotates the
+//     code (old code rejected), consumed code issues no session (C6)
 //   • Corporate OTP: 5 wrong guesses → 429, resend resets the counter (C6)
+//   • DNS ownership: instructions issued, verify 400s without a matching TXT
+//     record and never sets is_dns_verified (C13)
 //   • Phone OTP: per-account 60s send cooldown → 429 (C7)
 //   • Phone OTP: changing a verified number drops the verified flag (C7)
 //   • A job edit cannot forge status/flags/recruiter_id, and a public
@@ -189,9 +192,9 @@ const main = async () => {
     must(token, 'no session token issued');
   });
 
-  // --- email OTP attempt limit (C6) ----------------------------------------
-  console.log('\n[email OTP attempt limit]');
-  let lockEmailVerified = false;
+  // --- email OTP lifecycle: expiry, attempt limit, rotation, reuse (C6) ----
+  console.log('\n[email OTP lifecycle]');
+  let preRotationOtp = null;
   await step('register throwaway recruiter for lockout test', async () => {
     const r = await api('POST', '/api/auth/register', {
       body: { email: LOCK_EMAIL, password: 'SecPass123!', firstName: 'Lock', lastName: 'Test' },
@@ -200,6 +203,19 @@ const main = async () => {
     const row = await query('SELECT id FROM recruiters WHERE email = $1', [LOCK_EMAIL]);
     must(row.rowCount === 1, 'lock recruiter row not created');
     lockRecruiterId = row.rows[0].id;
+  });
+
+  await step('expired email OTP rejected (C6)', async () => {
+    preRotationOtp = (await query('SELECT email_otp FROM recruiters WHERE id = $1', [lockRecruiterId]))
+      .rows[0].email_otp;
+    must(preRotationOtp, 'no OTP stored for lock recruiter');
+    await query(`UPDATE recruiters SET email_otp_expires_at = NOW() - INTERVAL '1 minute' WHERE id = $1`, [lockRecruiterId]);
+    const r = await api('POST', '/api/auth/verify-email-otp', { body: { email: LOCK_EMAIL, otp: preRotationOtp } });
+    must(r.status === 400 && String(r.json?.error || '').toLowerCase().includes('expired'),
+      `expired OTP should 400 "expired", got ${r.status}: ${r.json?.error}`);
+    const row = await query('SELECT is_email_verified FROM recruiters WHERE id = $1', [lockRecruiterId]);
+    must(row.rows[0].is_email_verified !== true, 'expired OTP verified the account');
+    await query(`UPDATE recruiters SET email_otp_expires_at = NOW() + INTERVAL '24 hours' WHERE id = $1`, [lockRecruiterId]);
   });
 
   await step('5 wrong email OTPs each rejected, 6th attempt locked (429)', async () => {
@@ -214,13 +230,24 @@ const main = async () => {
     must(row.rows[0].is_email_verified !== true, 'lockout did not hold — account verified anyway');
   });
 
-  await step('resend resets the counter and the real code works', async () => {
+  let consumedOtp = null;
+  await step('resend rotates the code: old code rejected, new code verifies', async () => {
     const send = await api('POST', '/api/auth/resend-verification', { body: { email: LOCK_EMAIL } });
     must(send.status === 200, `resend failed: ${send.status}`);
+    // the rotated-away code must no longer be accepted
+    const old = await api('POST', '/api/auth/verify-email-otp', { body: { email: LOCK_EMAIL, otp: preRotationOtp } });
+    must(old.status === 400, `rotated (old) OTP should 400, got ${old.status}`);
     const real = await query('SELECT email_otp FROM recruiters WHERE id = $1', [lockRecruiterId]);
-    const r = await api('POST', '/api/auth/verify-email-otp', { body: { email: LOCK_EMAIL, otp: real.rows[0].email_otp } });
+    consumedOtp = real.rows[0].email_otp;
+    const r = await api('POST', '/api/auth/verify-email-otp', { body: { email: LOCK_EMAIL, otp: consumedOtp } });
     must(r.status === 200 && r.json?.success, `verify after resend failed: ${r.status} ${JSON.stringify(r.json)}`);
-    lockEmailVerified = true;
+  });
+
+  await step('re-using a consumed OTP issues no session token (C6)', async () => {
+    const r = await api('POST', '/api/auth/verify-email-otp', { body: { email: LOCK_EMAIL, otp: consumedOtp } });
+    must(r.status === 200 && r.json?.alreadyVerified === true,
+      `re-submitted OTP should short-circuit as alreadyVerified, got ${r.status}`);
+    must(r.json?.data?.token == null, 're-used OTP minted a session token');
   });
 
   // --- phone OTP policy (C7) ------------------------------------------------
@@ -379,6 +406,26 @@ const main = async () => {
     must(v.status === 200 && v.json?.success, `verify after resend failed: ${v.status} ${JSON.stringify(v.json)}`);
     const after = await query('SELECT is_corporate_email_verified FROM companies WHERE id = $1', [companyId]);
     must(after.rows[0].is_corporate_email_verified === true, 'corporate email not verified');
+  });
+
+  await step('DNS proof fails without a matching TXT record and never sets the flag (C13)', async () => {
+    const instr = await api('GET', `/api/company/${companyId}/dns-verification-instructions`, { token });
+    must(instr.status === 200 && instr.json?.data?.recordValue,
+      `instructions failed: ${instr.status} ${JSON.stringify(instr.json)}`);
+    must(/^trusthire-verify=[0-9a-f]{32}$/.test(instr.json.data.recordValue),
+      `unexpected token format: ${instr.json.data.recordValue}`);
+    // Nobody controls acme<stamp>.ng's DNS zone in this test, so the TXT
+    // lookup cannot pass — the endpoint must 400 and leave the flag clear.
+    const v = await api('POST', `/api/company/${companyId}/verify/dns`, { token });
+    must(v.status === 400, `DNS verify without TXT proof should 400, got ${v.status} ${JSON.stringify(v.json)}`);
+    const row = await query('SELECT is_dns_verified FROM companies WHERE id = $1', [companyId]);
+    must(row.rows[0].is_dns_verified === false, 'is_dns_verified set without DNS proof');
+    const checkRow = await query(
+      `SELECT is_successful FROM verification_checks WHERE target_id = $1 AND check_type = 'dns_ownership' ORDER BY created_at DESC LIMIT 1`,
+      [companyId],
+    );
+    must(checkRow.rowCount === 1 && checkRow.rows[0].is_successful !== true,
+      'failed DNS attempt recorded as successful');
   });
 
   // --- job A: pre-verification job stays pending + edit cannot forge (C1) --

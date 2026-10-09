@@ -165,7 +165,7 @@ console.log('✔ Domain extraction & recruiter linkage verification passed!\n');
 // ----------------------------------------------------
 console.log('--- [6/6] Testing Public-Suffix Bypass & SSRF Guard ---');
 import { PUBLIC_SUFFIXES } from '../utils/domainHelper.js';
-import { assertPublicUrl } from '../services/whois.service.js';
+import { assertPublicUrl, getDnsVerificationToken } from '../services/whois.service.js';
 
 // C8: a bare public suffix is not a registrable company domain — matching
 // against it must never count as corporate linkage.
@@ -196,7 +196,21 @@ for (const u of rejects) {
 // A public IP literal (EXAMPLE domain's address) must be allowed — proves
 // the guard isn't just "reject everything".
 await assertPublicUrl('http://93.184.216.34/');
-console.log('✔ Public-suffix bypass & SSRF guard passed!\n');
+
+// C13: the DNS TXT token must be bound to BOTH the company and the domain —
+// a token issued for an old website cannot validate after a website change.
+const dnsTok1 = getDnsVerificationToken('company-1', 'example.com');
+const dnsTok2 = getDnsVerificationToken('company-1', 'other.com');
+const dnsTok3 = getDnsVerificationToken('company-2', 'example.com');
+assert.match(dnsTok1, /^trusthire-verify=[0-9a-f]{32}$/, 'DNS token format wrong');
+assert.notStrictEqual(dnsTok1, dnsTok2, 'DNS token must be bound to the domain (C13)');
+assert.notStrictEqual(dnsTok1, dnsTok3, 'DNS token must be bound to the company');
+assert.strictEqual(
+  getDnsVerificationToken('company-1', 'example.com'),
+  dnsTok1,
+  'DNS token must be deterministic for the same company+domain',
+);
+console.log('✔ Public-suffix bypass, SSRF guard & DNS token binding passed!\n');
 
 console.log('====================================================');
 console.log('✅ ALL BACKEND UNIT TESTS EXECUTED AND PASSED!');
