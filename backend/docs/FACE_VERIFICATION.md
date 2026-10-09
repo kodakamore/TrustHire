@@ -69,10 +69,33 @@ backend flow. In production, missing keys are a hard error — never a silent
 mock. Adding real keys flips the portal to Didit's hosted camera flow with
 **no code changes**.
 
+### Liveness method: active vs passive
+
+The workflow's liveness block may be configured `ACTIVE_3D` (guided
+blink/head-turn challenges) or `PASSIVE`. **Didit substitutes passive liveness
+whenever the desktop fallback is enabled and the user is on a desktop** — the
+recruiter just looks at the camera for a moment, no challenges. This is not a
+malfunction: passive liveness is deepfake/injection detection rather than
+challenge-response. To force interactive challenges, either disable the
+desktop fallback on the workflow (mobile-only) or configure the liveness
+method explicitly in the Didit console. The returned `method`
+(`ACTIVE_3D` / `FLASHING` / `PASSIVE`) is recorded in the encrypted raw event
+for the audit trail.
+
 ## Data & privacy posture (NDPA 2023)
 
-- TrustHire stores the **decision**, not the biometrics. Face images/video
-  stay on Didit for its retention window.
+- TrustHire stores the **decision** plus (for dashboard display) the
+  verified **face image** — downloaded at approval time from Didit's
+  short-validity presigned URLs (`liveness_checks[].reference_image`).
+  The raw document images and videos stay on Didit.
+- The face image is persisted in the **AES-256-GCM encrypted photo store**
+  (same object storage as NIN/BVN photos); the DB holds only a
+  `photo://<uuid>` pointer (`recruiter_face_verifications.face_photo_ref`).
+- It is served **only** to the authenticated recruiter themselves via
+  `GET /api/verify/face/photo` (owner-checked, `no-store`, decrypted in
+  memory). Never in list payloads, never cached, never public.
+- In mock mode the in-portal webcam capture fills the same slot, so the
+  dashboard behaves identically with and without Didit keys.
 - The raw provider event is stored **encrypted at rest** in
   `recruiter_face_verifications.raw_result` (envelope AES-256-GCM) as an audit
   record; it contains metadata/scores, not images.

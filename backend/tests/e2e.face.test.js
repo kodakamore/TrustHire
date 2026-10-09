@@ -16,6 +16,8 @@
 import 'dotenv/config';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import jwt from 'jsonwebtoken';
@@ -37,6 +39,7 @@ const WEBHOOK_SECRET = 'face-e2e-test-secret';
 const ids = { recruiterA: null, recruiterB: null };
 const faceRecords = [];
 let tokenA = null;
+let imgServerRef = null; // in-test media host, closed in finally
 
 const results = [];
 const step = async (name, fn) => {
@@ -154,15 +157,27 @@ const stopServer = () => {
 const cleanup = async () => {
   try {
     for (const recId of [ids.recruiterA, ids.recruiterB]) {
-      if (recId) await query('DELETE FROM verification_checks WHERE target_id = $1', [recId]);
-      if (recId) await query('DELETE FROM recruiter_face_verifications WHERE recruiter_id = $1', [recId]);
-      if (recId) await query('DELETE FROM recruiters WHERE id = $1', [recId]);
+      if (!recId) continue;
+      // Encrypted face-photo objects: remove blobs from disk, then rows.
+      const media = await query('SELECT storage_key FROM media_objects WHERE owner_id = $1', [recId]);
+      for (const m of media.rows) {
+        const abs = path.resolve(BACKEND_DIR, process.env.STORAGE_ROOT || 'storage/photos', m.storage_key);
+        try { fs.rmSync(abs, { force: true }); } catch { /* already gone */ }
+      }
+      await query('DELETE FROM media_objects WHERE owner_id = $1', [recId]);
+      await query('DELETE FROM verification_checks WHERE target_id = $1', [recId]);
+      await query('DELETE FROM recruiter_face_verifications WHERE recruiter_id = $1', [recId]);
+      await query('DELETE FROM recruiters WHERE id = $1', [recId]);
     }
     console.log('  (face fixtures removed)');
   } catch (e) {
     console.log(`  ! cleanup warning: ${e.message}`);
   }
 };
+
+// 1x1 JPEG — stands in for a captured webcam frame / Didit reference image.
+const TINY_JPEG_B64 =
+  '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFQABAQAAAAAAAAAAAAAAAAAAAAj/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdABmX/9k=';
 
 const seedRecruiter = async (email, { faceVerified, status }) => {
   const passwordHash = await bcrypt.hash(FACE_PASSWORD, 10);
@@ -217,7 +232,10 @@ async function main() {
     });
 
     await step('mock capture completion -> approved + recruiter flags + audit row', async () => {
-      const r = await api('POST', '/api/verify/face/mock/complete', { token: tokenA });
+      const r = await api('POST', '/api/verify/face/mock/complete', {
+        token: tokenA,
+        body: { selfieBase64: `data:image/jpeg;base64,${TINY_JPEG_B64}` },
+      });
       must(r.status === 200, `expected 200, got ${r.status}`);
 
       const st = await api('GET', '/api/verify/face/status', { token: tokenA });
@@ -246,6 +264,45 @@ async function main() {
       must(r.json?.data?.alreadyVerified === true, 'should short-circuit when already verified');
     });
 
+    await step('verified face photo stored encrypted + served via self-view endpoint', async () => {
+      // Status now advertises the photo
+      const st = await api('GET', '/api/verify/face/status', { token: tokenA });
+      must(st.json?.data?.faceVerification?.hasFacePhoto === true, 'hasFacePhoto should be true after mock capture');
+
+      // Encrypted object exists in the photo store (never plaintext on disk)
+      const media = await query(
+        "SELECT * FROM media_objects WHERE owner_id = $1 AND purpose = 'face_liveness'",
+        [ids.recruiterA],
+      );
+      must(media.rows.length === 1, `expected 1 face media row, got ${media.rows.length}`);
+      const abs = path.resolve(BACKEND_DIR, process.env.STORAGE_ROOT || 'storage/photos', media.rows[0].storage_key);
+      const onDisk = fs.readFileSync(abs, 'utf8');
+      must(onDisk.startsWith('v1:'), 'photo blob must be envelope-encrypted ciphertext');
+
+      // Self-view endpoint serves the decrypted image with hardening headers
+      const res = await fetch(`${BASE}/api/verify/face/photo`, {
+        headers: { Authorization: `Bearer ${tokenA}` },
+      });
+      must(res.status === 200, `photo endpoint expected 200, got ${res.status}`);
+      must((res.headers.get('content-type') || '').startsWith('image/'), 'content-type must be an image');
+      must((res.headers.get('cache-control') || '').includes('no-store'), 'photo must be no-store');
+      const bytes = Buffer.from(await res.arrayBuffer());
+      must(bytes.length > 0, 'photo bytes empty');
+      // JPEG magic numbers — proves decryption round-tripped the real image
+      must(bytes[0] === 0xff && bytes[1] === 0xd8, 'served bytes are not a JPEG');
+
+      // Unauthenticated -> 401
+      const anon = await fetch(`${BASE}/api/verify/face/photo`);
+      must(anon.status === 401, `photo endpoint without token expected 401, got ${anon.status}`);
+
+      // Another recruiter's token -> 404 (their own record has no photo yet)
+      const tokenB = jwt.sign({ id: ids.recruiterB, email: RECR_B_EMAIL }, process.env.JWT_SECRET, { expiresIn: '1h' });
+      const other = await fetch(`${BASE}/api/verify/face/photo`, {
+        headers: { Authorization: `Bearer ${tokenB}` },
+      });
+      must(other.status === 404, `photo endpoint for photoless recruiter expected 404, got ${other.status}`);
+    });
+
     await step('mock complete disabled with no pending mock session', async () => {
       const r = await api('POST', '/api/verify/face/mock/complete', { token: tokenA });
       // Already-terminal record: endpoint reports a no-op or a clean error,
@@ -257,6 +314,16 @@ async function main() {
 
     // --- webhook path (recruiter B) ------------------------------------------
     let hookSession = null;
+
+    // Local stand-in for Didit's media host: serves the reference_image bytes
+    // the backend must download at approval time.
+    const imgServer = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'image/jpeg' });
+      res.end(Buffer.from(TINY_JPEG_B64, 'base64'));
+    });
+    await new Promise((r) => imgServer.listen(0, '127.0.0.1', r));
+    imgServerRef = imgServer;
+    const imgPort = imgServer.address().port;
 
     await step('seed pending session for webhook delivery', async () => {
       const row = await FaceVerification.create({
@@ -271,6 +338,10 @@ async function main() {
 
     await step('signed webhook (V3 Approved envelope) -> verified', async () => {
       const event = v3ApprovedEvent(hookSession.session_id, String(ids.recruiterB));
+      // Include the presigned media URL — the backend must download these
+      // bytes at approval time (Didit URLs are short-validity).
+      event.decision.liveness_checks[0].reference_image =
+        `http://127.0.0.1:${imgPort}/reference.jpg`;
       const payload = JSON.stringify(event);
       const r = await api('POST', '/api/webhooks/didit', {
         body: payload,
@@ -285,6 +356,15 @@ async function main() {
 
       const rec = await query('SELECT is_face_verified FROM recruiters WHERE id = $1', [ids.recruiterB]);
       must(rec.rows[0].is_face_verified === true, 'webhook should set is_face_verified');
+
+      // reference_image was downloaded and stored encrypted (photo:// pointer)
+      must(!!row.rows[0].face_photo_ref, 'face_photo_ref should be set from reference_image');
+      must(row.rows[0].face_photo_ref.startsWith('photo://'), 'face_photo_ref must be a photo:// pointer');
+      const media = await query(
+        "SELECT * FROM media_objects WHERE owner_id = $1 AND purpose = 'face_liveness'",
+        [ids.recruiterB],
+      );
+      must(media.rows.length === 1, 'reference_image bytes must land in encrypted store');
     });
 
     await step('webhook replay (same event) is idempotent', async () => {
@@ -430,6 +510,7 @@ async function main() {
     console.error(`\nFATAL: ${e.message}`);
   } finally {
     stopServer();
+    if (imgServerRef) { try { imgServerRef.close(); } catch { /* gone */ } }
     await cleanup();
   }
 

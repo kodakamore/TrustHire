@@ -69,3 +69,15 @@ export const markDecision = async ({
   ]);
   return res.rows[0] || null; // null = already terminal (idempotent replay)
 };
+
+/** Attach the encrypted-store pointer of the verified face image. */
+export const setFacePhotoRef = async (id, ref) => {
+  const res = await query(
+    `UPDATE recruiter_face_verifications
+     SET face_photo_ref = $2, updated_at = now()
+     WHERE id = $1
+     RETURNING face_photo_ref;`,
+    [id, ref],
+  );
+  return res.rows[0]?.face_photo_ref ?? null;
+};

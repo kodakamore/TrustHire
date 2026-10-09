@@ -2,32 +2,42 @@ import React, { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import VerificationProgress from '../components/VerificationProgress';
 import StatusBadge from '../components/StatusBadge';
+import VerifiedFacePhoto from '../components/VerifiedFacePhoto';
 import { verify, company, job } from '../services/api';
 
 const Dashboard = () => {
   const navigate = useNavigate();
   const [isLoading, setIsLoading] = useState(true);
-  
-  // Mock state for now
+
+  // Verification status is fetched from the real API (was mock state).
   const [verificationStatus, setVerificationStatus] = useState({
-    emailVerified: true,
+    emailVerified: false,
     phoneVerified: false,
     identityVerified: false,
     faceVerified: false,
-    overallStatus: 'partially_verified'
+    overallStatus: 'unverified'
   });
-  
+
   const [companies, setCompanies] = useState([]);
   const [jobs, setJobs] = useState([]);
 
   useEffect(() => {
     const fetchDashboardData = async () => {
       try {
-        // Normally this would be real API calls
-        // const vStatus = await verify.getStatus();
-        // const comps = await company.getAll();
-        // const js = await job.getAll();
-        
+        // Real verification status (drives the progress bar + CTA below)
+        const vRes = await verify.getStatus();
+        const rec = vRes.data?.data;
+        if (rec) {
+          setVerificationStatus({
+            emailVerified: !!rec.is_email_verified,
+            phoneVerified: !!rec.is_phone_verified,
+            identityVerified: !!rec.is_identity_verified,
+            faceVerified: !!rec.is_face_verified,
+            overallStatus: rec.verification_status || 'unverified'
+          });
+        }
+        // Companies/jobs listing to be wired when the endpoints are ready;
+        // keeping the current placeholders for now.
         setTimeout(() => {
           setCompanies([
             { id: 1, name: 'TechCorp Nigeria', status: 'verified', rcNumber: 'RC123456' }
@@ -37,13 +47,13 @@ const Dashboard = () => {
             { id: 102, title: 'Product Manager', company: 'TechCorp Nigeria', status: 'under_review', pin: null, expiresAt: null }
           ]);
           setIsLoading(false);
-        }, 800);
+        }, 300);
       } catch (error) {
         console.error("Error fetching dashboard data", error);
         setIsLoading(false);
       }
     };
-    
+
     fetchDashboardData();
   }, []);
 
@@ -60,9 +70,20 @@ const Dashboard = () => {
   return (
     <div className="space-y-6">
       <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
-        <h1 className="text-2xl font-bold text-gray-900 mb-2">Welcome back, Recruiter</h1>
-        <p className="text-gray-500">Manage your companies and job advertisements here.</p>
-        
+        <div className="flex items-center space-x-4">
+          <VerifiedFacePhoto size="h-16 w-16" />
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">Welcome back, Recruiter</h1>
+            <p className="text-gray-500">Manage your companies and job advertisements here.</p>
+          </div>
+        </div>
+        {verificationStatus.faceVerified && (
+          <p className="mt-3 text-xs text-emerald-700 flex items-center">
+            <svg className="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"></path></svg>
+            Face verified — this is the image captured during your liveness check.
+          </p>
+        )}
+
         <div className="mt-8">
           <VerificationProgress {...verificationStatus} />
           

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import FaceLivenessCapture from './FaceLivenessCapture';
+import VerifiedFacePhoto from './VerifiedFacePhoto';
 import { verify as verifyApi } from '../services/api';
 
 // ===========================================================================
@@ -78,11 +79,13 @@ const DiditFaceVerification = ({ onComplete }) => {
     return () => clearInterval(pollRef.current);
   }, [phase, onComplete]);
 
-  const handleMockCapture = async () => {
+  const handleMockCapture = async (base64Selfie) => {
     setSubmitting(true);
     setErrorMsg(null);
     try {
-      await verifyApi.completeMockFaceSession();
+      // The captured webcam frame becomes the stored verified-face image —
+      // same dashboard result as the live Didit flow.
+      await verifyApi.completeMockFaceSession({ selfieBase64: base64Selfie });
       const res = await verifyApi.getFaceStatus();
       if (res.data?.data?.faceVerification?.status === 'approved') {
         setPhase('approved');
@@ -100,8 +103,8 @@ const DiditFaceVerification = ({ onComplete }) => {
   if (phase === 'approved') {
     return (
       <div className="bg-emerald-50 border border-emerald-200 p-6 rounded-xl text-center space-y-3">
-        <div className="w-12 h-12 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto">
-          <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"></path></svg>
+        <div className="flex justify-center">
+          <VerifiedFacePhoto size="h-16 w-16" />
         </div>
         <h4 className="font-bold text-emerald-900 text-base">Liveness Verification Passed</h4>
         <p className="text-xs text-emerald-700 max-w-md mx-auto">

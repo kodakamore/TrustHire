@@ -36,7 +36,10 @@ export const verify = {
   // Didit-powered face/liveness session flow (Step 4)
   startFaceSession: () => api.post('/verify/face/session'),
   getFaceStatus: () => api.get('/verify/face/status'),
-  completeMockFaceSession: () => api.post('/verify/face/mock/complete'),
+  completeMockFaceSession: (data) => api.post('/verify/face/mock/complete', data),
+  // Authenticated image endpoint — must fetch as blob (<img> tags cannot
+  // send the Authorization header); caller converts to an object URL.
+  getFacePhoto: () => api.get('/verify/face/photo', { responseType: 'blob' }),
   getStatus: () => api.get('/verify/status'),
 };
 

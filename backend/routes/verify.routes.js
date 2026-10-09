@@ -11,6 +11,7 @@ import {
   startFaceSession,
   getFaceStatus,
   completeMockSession,
+  getFacePhoto,
 } from "../controllers/face.controller.js";
 import { authenticateRecruiter } from "../middleware/auth.js";
 import { auditLogger } from "../middleware/auditLogger.js";
@@ -40,6 +41,7 @@ router.post("/face", verifyFace, auditLogger("VERIFY_FACE"));
 // Didit-powered face/liveness verification (hosted real-camera capture).
 router.post("/face/session", startFaceSession, auditLogger("FACE_SESSION_CREATED"));
 router.get("/face/status", getFaceStatus);
+router.get("/face/photo", getFacePhoto);
 router.post("/face/mock/complete", completeMockSession, auditLogger("VERIFY_FACE_MOCK"));
 router.get("/status", getVerificationStatus);
 

@@ -3,6 +3,7 @@ import * as FaceVerification from '../models/faceVerification.model.js';
 import * as Recruiter from '../models/recruiter.model.js';
 import * as VerificationCheck from '../models/verificationCheck.model.js';
 import { encryptField } from '../utils/cryptoHelper.js';
+import { putImage, getImageById } from '../services/storage.service.js';
 
 // ===========================================================================
 // Recruiter face/liveness verification via Didit.
@@ -17,6 +18,61 @@ import { encryptField } from '../utils/cryptoHelper.js';
 // ===========================================================================
 
 const TERMINAL = new Set(['approved', 'declined']);
+
+// ---------------------------------------------------------------------------
+// Verified face image: the V3 decision carries presigned media URLs
+// (liveness_checks[].reference_image preferred — it is the liveness face crop;
+// face_matches[].target_image as fallback). Didit's docs are explicit that
+// these URLs are short-validity and must be downloaded promptly, never
+// persisted — so we fetch the bytes at approval time and move them into the
+// AES-256-GCM photo store, keeping only a photo:// pointer on the record.
+// Download failures never block the verdict (the decision is the contract).
+// ---------------------------------------------------------------------------
+const MAX_FACE_IMAGE_BYTES = 5 * 1024 * 1024;
+
+const extractFaceImageUrl = (event) => {
+  const s = event?.session && typeof event.session === 'object' ? event.session : event || {};
+  const decision = s.decision && typeof s.decision === 'object' ? s.decision : s;
+  const firstOf = (arr) => (Array.isArray(arr) && arr.length ? arr[0] : null);
+  const live = firstOf(decision.liveness_checks) || firstOf(s.liveness_checks);
+  const match = firstOf(decision.face_matches) || firstOf(s.face_matches);
+  const url = live?.reference_image || match?.target_image || null;
+  return typeof url === 'string' && url.startsWith('http') ? url : null;
+};
+
+const storeFaceImage = async (record, event) => {
+  const url = extractFaceImageUrl(event);
+  if (!url) return false;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) {
+      console.warn(`Face image download failed (HTTP ${res.status}) — verdict unaffected`);
+      return false;
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length === 0 || buf.length > MAX_FACE_IMAGE_BYTES) {
+      console.warn(`Face image rejected (size ${buf.length}) — verdict unaffected`);
+      return false;
+    }
+    const mimeType = (res.headers.get('content-type') || 'image/jpeg').split(';')[0];
+    const dataUrl = `data:${mimeType};base64,${buf.toString('base64')}`;
+    const media = await putImage({
+      payload: dataUrl,
+      ownerType: 'recruiter',
+      ownerId: record.recruiter_id,
+      purpose: 'face_liveness',
+    });
+    await FaceVerification.setFacePhotoRef(record.id, `photo://${media.id}`);
+    return true;
+  } catch (err) {
+    clearTimeout(timeout);
+    console.warn(`Face image store error: ${err.message} — verdict unaffected`);
+    return false;
+  }
+};
 
 /**
  * Map any Didit status/decision string onto our lifecycle. V3 labels are
@@ -159,6 +215,9 @@ export const processDiditEvent = async (event, source = 'webhook') => {
         verification_status: allVerified ? 'verified' : 'partially_verified',
       });
     }
+    // Capture the verified face image into encrypted storage (best-effort —
+    // a failed download never reverses the approval).
+    await storeFaceImage(updated, event);
   }
 
   return { ok: true, status };
@@ -252,12 +311,48 @@ export const getFaceStatus = async (req, res) => {
               faceMatchScore: record.face_match_score,
               verifiedAt: record.verified_at,
               createdAt: record.created_at,
+              hasFacePhoto: !!record.face_photo_ref,
             }
           : null,
       },
     });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * Recruiter's own verified face image — decrypted from the photo store and
+ * streamed once (same hardening as the admin media endpoint: no-store,
+ * noindex, never cached). Scoped to the authenticated recruiter's OWN latest
+ * approved verification; there is no id parameter to enumerate.
+ */
+export const getFacePhoto = async (req, res) => {
+  try {
+    const record = await FaceVerification.findLatestByRecruiterId(req.user.id);
+    if (!record?.face_photo_ref || !record.face_photo_ref.startsWith('photo://')) {
+      return res.status(404).json({ success: false, error: 'No verified face photo on file' });
+    }
+    const mediaId = record.face_photo_ref.slice('photo://'.length);
+    const { buffer, mimeType, row } = await getImageById(mediaId);
+    if (row.owner_type !== 'recruiter' || row.owner_id !== req.user.id) {
+      // Pointer must belong to the authenticated recruiter (defense in depth).
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+    res.set({
+      'Content-Type': mimeType,
+      'Content-Length': String(buffer.length),
+      'Cache-Control': 'no-store, no-cache, must-revalidate, private',
+      'Pragma': 'no-cache',
+      'X-Robots-Tag': 'noindex, nofollow',
+      'Content-Disposition': 'inline',
+    });
+    return res.end(buffer);
+  } catch (error) {
+    if (/not found/i.test(error.message)) {
+      return res.status(404).json({ success: false, error: 'Face photo not found' });
+    }
+    return res.status(500).json({ success: false, error: 'Unable to load face photo' });
   }
 };
 
@@ -292,6 +387,27 @@ export const completeMockSession = async (req, res) => {
       },
       'mock',
     );
+
+    // Mock mode has no Didit media URLs — the portal's webcam capture IS the
+    // verified face image. Store it through the same encrypted photo path so
+    // the dashboard behaves identically in both modes.
+    const selfieBase64 = req.body?.selfieBase64;
+    if (typeof selfieBase64 === 'string' && selfieBase64.length > 0) {
+      try {
+        const latest = await FaceVerification.findLatestByRecruiterId(req.user.id);
+        if (latest?.status === 'approved' && !latest.face_photo_ref) {
+          const media = await putImage({
+            payload: selfieBase64,
+            ownerType: 'recruiter',
+            ownerId: req.user.id,
+            purpose: 'face_liveness',
+          });
+          await FaceVerification.setFacePhotoRef(latest.id, `photo://${media.id}`);
+        }
+      } catch (err) {
+        console.warn(`Mock face photo store error: ${err.message} — verdict unaffected`);
+      }
+    }
 
     res.json({ success: true, message: 'Mock liveness verification recorded.' });
   } catch (error) {
