@@ -57,16 +57,24 @@ const Register = () => {
     setIsLoading(true);
     setApiError('');
     try {
-      // Mocked API response due to proxy absence in this environment
-      // const response = await auth.register(formData);
-      // localStorage.setItem('token', response.data.token);
-      
-      // Simulating network request
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      localStorage.setItem('token', 'mock_token_123');
-      navigate('/verify-identity');
+      // Real backend registration. Backend responds 201 with
+      // { requiresVerification: true } plus (development only) the
+      // verification link and OTP — carried to /verify-email so the whole
+      // activation loop completes in-app even when the email channel is
+      // unavailable.
+      const { confirmPassword, ...payload } = formData;
+      const response = await auth.register(payload);
+      const d = response.data?.data || {};
+      navigate('/verify-email', {
+        state: {
+          email: d.email,
+          debugOtp: d.debugOtp,
+          verificationLink: d.verificationLink,
+          message: response.data?.message,
+        },
+      });
     } catch (err) {
-      setApiError(err.response?.data?.message || 'Registration failed. Please try again.');
+      setApiError(err.response?.data?.error || 'Registration failed. Please try again.');
     } finally {
       setIsLoading(false);
     }

@@ -26,6 +26,10 @@ api.interceptors.response.use(
 export const auth = {
   register: (data) => api.post('/auth/register', data),
   login: (data) => api.post('/auth/login', data),
+  // Email activation (registration loop): link-token and 6-digit OTP paths
+  verifyEmailToken: (data) => api.post('/auth/verify-email', data),
+  verifyEmailOtp: (data) => api.post('/auth/verify-email-otp', data),
+  resendVerification: (data) => api.post('/auth/resend-verification', data),
 };
 
 export const verify = {

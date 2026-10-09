@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { auth } from '../services/api';
 
 const Login = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   const [formData, setFormData] = useState({
     email: '',
     password: '',
@@ -11,6 +12,7 @@ const Login = () => {
   const [errors, setErrors] = useState({});
   const [isLoading, setIsLoading] = useState(false);
   const [apiError, setApiError] = useState('');
+  const notice = location.state?.notice || '';
 
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
@@ -38,15 +40,14 @@ const Login = () => {
     setIsLoading(true);
     setApiError('');
     try {
-      // Mocked API response due to proxy absence
-      // const response = await auth.login(formData);
-      // localStorage.setItem('token', response.data.token);
-      
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      localStorage.setItem('token', 'mock_token_123');
-      navigate('/dashboard');
+      const response = await auth.login(formData);
+      // Real backend session token (response shape: { success, data: { token } }).
+      // The previous stub stored a fake token, which 401'd on the first
+      // authenticated Dashboard call and bounced back here.
+      localStorage.setItem('token', response.data.data.token);
+      navigate('/dashboard', { replace: true });
     } catch (err) {
-      setApiError(err.response?.data?.message || 'Invalid email or password.');
+      setApiError(err.response?.data?.error || 'Invalid email or password.');
     } finally {
       setIsLoading(false);
     }
@@ -69,6 +70,11 @@ const Login = () => {
       <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
         <div className="bg-white py-8 px-4 shadow sm:rounded-lg sm:px-10">
           <form className="space-y-6" onSubmit={handleSubmit}>
+            {notice && (
+              <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 px-4 py-3 rounded relative" role="status">
+                <span className="block sm:inline">{notice}</span>
+              </div>
+            )}
             {apiError && (
               <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded relative" role="alert">
                 <span className="block sm:inline">{apiError}</span>
